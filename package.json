@@ -1,0 +1,26 @@
+{
+  "name": "barbara-los-cuchos",
+  "version": "1.0.0",
+  "description": "Bárbara, asistente virtual de WhatsApp de Abasto Los Cuchos",
+  "type": "module",
+  "main": "src/wweb.js",
+  "scripts": {
+    "start": "node src/wweb.js",
+    "start:cloud": "node src/server.js",
+    "chat": "node scripts/chat.js",
+    "check": "node scripts/check-gemini.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  },
+  "overrides": {
+    "basic-ftp": "^6.2.1"
+  }
+}
