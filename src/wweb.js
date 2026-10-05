@@ -367,7 +367,8 @@ async function start(attempt = 1) {
   try {
     await client.initialize();
   } catch (err) {
-    console.error(`No se pudo abrir WhatsApp Web (intento ${attempt} de ${MAX_START_ATTEMPTS}): ${err.message}`);
+    console.error(`No se pudo abrir WhatsApp Web (intento ${attempt} de ${MAX_START_ATTEMPTS}): ${err?.message ?? err}`);
+    if (err?.stack) console.error(err.stack.split('\n').slice(1, 6).join('\n'));
     await client.destroy().catch(() => {});
     if (attempt < MAX_START_ATTEMPTS) {
       console.log('Reintentando en 15 s...');
@@ -384,5 +385,14 @@ async function start(attempt = 1) {
   }
 }
 
+function packageVersion(name) {
+  try {
+    return JSON.parse(fs.readFileSync(path.resolve('node_modules', name, 'package.json'), 'utf8')).version;
+  } catch {
+    return '?';
+  }
+}
+
+console.log(`Node ${process.version} | whatsapp-web.js ${packageVersion('whatsapp-web.js')} | puppeteer ${packageVersion('puppeteer')}`);
 console.log('Iniciando WhatsApp (la primera vez tarda un poco)...');
 start();
