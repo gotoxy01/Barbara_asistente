@@ -93,7 +93,7 @@ function fuzzyMatch(queryToken, productToken) {
 // Carga del catálogo
 // ---------------------------------------------------------------------------
 
-// Las tarifas de delivery las define orderService, no el catálogo de la caja.
+// Los artículos de delivery no se ofrecen como productos; "Delivery costo" se usa como tarifa (getDeliveryCost).
 const IS_DELIVERY_RE = /\bdelivery\b/i;
 const IS_BOTELLON_RE = /botell[oó]n/i;
 
@@ -148,6 +148,7 @@ function loadFromDatabase(path) {
 
     const products = [];
     const seen = new Set();
+    let deliveryUsd = null;
     for (const src of DB_SOURCES) {
       if (!tables.has(src.table)) continue;
       for (const row of db.prepare(src.sql).all()) {
@@ -165,7 +166,14 @@ function loadFromDatabase(path) {
         products.push(buildProduct({ nombre, presentacion, precio: row.precio, categoria: src.categoria }));
       }
     }
-    return products;
+    if (tables.has('articulos')) {
+      const wanted = normalize(config.delivery.itemName);
+      // Sin filtrar por stock: el delivery es un servicio y en la caja puede figurar con stock 0.
+      const row = db.prepare("SELECT articulo AS nombre, precio FROM articulos WHERE precio > 0 AND articulo LIKE '%deliver%'").all()
+        .find((r) => normalize(String(r.nombre ?? '').replace(/\s+/g, ' ').trim()) === wanted);
+      if (row) deliveryUsd = Number(row.precio);
+    }
+    return { products, deliveryUsd };
   } finally {
     db.close();
   }
@@ -173,9 +181,13 @@ function loadFromDatabase(path) {
 
 function loadFromJson(path) {
   const items = JSON.parse(fs.readFileSync(path, 'utf8'));
-  return items
-    .filter((p) => p.nombre && Number(p.precio) > 0 && !IS_DELIVERY_RE.test(p.nombre))
-    .map((p) => buildProduct(p));
+  const delivery = items.find((p) => p.nombre && normalize(p.nombre) === normalize(config.delivery.itemName));
+  return {
+    products: items
+      .filter((p) => p.nombre && Number(p.precio) > 0 && !IS_DELIVERY_RE.test(p.nombre))
+      .map((p) => buildProduct(p)),
+    deliveryUsd: Number(delivery?.precio) > 0 ? Number(delivery.precio) : null,
+  };
 }
 
 function resolveSource() {
@@ -185,22 +197,36 @@ function resolveSource() {
   return fs.existsSync(dbPath) ? { type: 'db', path: dbPath } : { type: 'json', path: jsonPath };
 }
 
-let cache = { products: [], loadedAt: 0, source: null };
+let cache = { products: [], deliveryUsd: null, loadedAt: 0, source: null };
 
 /** Catálogo en memoria, releído de la fuente cada CATALOG_REFRESH_MINUTES. */
 export function getProducts() {
   const maxAge = config.catalog.refreshMinutes * 60 * 1000;
   if (!cache.products.length || Date.now() - cache.loadedAt > maxAge) {
     const source = resolveSource();
-    const products = source.type === 'db' ? loadFromDatabase(source.path) : loadFromJson(source.path);
-    cache = { products, loadedAt: Date.now(), source };
+    const { products, deliveryUsd } = source.type === 'db' ? loadFromDatabase(source.path) : loadFromJson(source.path);
+    cache = { products, deliveryUsd, loadedAt: Date.now(), source };
   }
   return cache.products;
 }
 
+/**
+ * Costo del delivery (uno por pedido) = precio del artículo "Delivery costo" del sistema de caja,
+ * así se actualiza solo cuando cambian el precio en la caja. Si no existe, usa DELIVERY_FALLBACK_USD.
+ */
+export function getDeliveryCost() {
+  getProducts();
+  return cache.deliveryUsd ?? config.delivery.fallbackUsd;
+}
+
 export function getCatalogInfo() {
   const products = getProducts();
-  return { count: products.length, source: `${cache.source.type}: ${cache.source.path}` };
+  return {
+    count: products.length,
+    source: `${cache.source.type}: ${cache.source.path}`,
+    deliveryUsd: getDeliveryCost(),
+    deliveryFromCatalog: cache.deliveryUsd != null,
+  };
 }
 
 // ---------------------------------------------------------------------------

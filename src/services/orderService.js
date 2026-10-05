@@ -2,7 +2,7 @@ import { Type } from '@google/genai';
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
-import { findProduct, isBotellon, productLabel } from './catalogService.js';
+import { findProduct, getDeliveryCost, isBotellon, productLabel } from './catalogService.js';
 
 export const BOLETA_MARKER = '[BOLETA]';
 
@@ -47,7 +47,7 @@ function money(usd, bs) {
 
 /**
  * Líneas del pedido + tarifas de delivery + totales.
- * Delivery Botellón ($1.00) si hay algún botellón; Delivery General ($1.50) si hay cualquier otro producto.
+ * Un solo delivery por pedido, al precio del artículo "Delivery costo" del sistema de caja.
  * @param {object[]} items
  * @param {import('./bcvService.js').BcvRate|null} bcv
  */
@@ -62,8 +62,7 @@ export function computeTotals(items, bcv) {
   const pending = pendingWeighItems(items).map((i) => i.detalle);
 
   const fees = [];
-  if (items.some((i) => i.botellon)) fees.push({ label: '🚚 Delivery Botellón', ...line(config.delivery.botellonUsd) });
-  if (items.some((i) => !i.botellon)) fees.push({ label: '🚚 Delivery General', ...line(config.delivery.generalUsd) });
+  if (items.length) fees.push({ label: '🚚 Delivery', ...line(getDeliveryCost()) });
 
   const all = [...lines, ...fees];
   const totalUsd = round2(all.reduce((s, l) => s + l.usd, 0));
@@ -84,10 +83,11 @@ export function renderBoleta(items, bcv) {
   ].join('\n');
 }
 
-/** Tarifas de delivery ya convertidas a Bs, para que la IA no tenga que calcularlas. */
+/** Tarifa de delivery ya convertida a Bs, para que la IA no tenga que calcularla. */
 export function renderDeliveryFees(bcv) {
-  const fee = (usd) => (bcv ? `Bs. ${toBolivares(usd, bcv.rate).toFixed(2)} (o $ ${usd.toFixed(2)} USD)` : `$ ${usd.toFixed(2)} USD`);
-  return `TARIFAS DE DELIVERY: Botellón ${fee(config.delivery.botellonUsd)} | General (cualquier otro producto) ${fee(config.delivery.generalUsd)}.`;
+  const usd = getDeliveryCost();
+  const fee = bcv ? `Bs. ${toBolivares(usd, bcv.rate).toFixed(2)} (o $ ${usd.toFixed(2)} USD)` : `$ ${usd.toFixed(2)} USD`;
+  return `TARIFA DE DELIVERY: ${fee} por pedido (una sola vez, sin importar los productos).`;
 }
 
 /** Resumen del carrito para el System Prompt de Bárbara. */

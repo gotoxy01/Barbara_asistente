@@ -293,6 +293,9 @@ client.on('ready', async () => {
   const bcv = await getBcvRate();
   console.log(`\n✅ Bárbara conectada a WhatsApp como +${getOwnPhone()}`);
   console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
+  console.log(catalog.deliveryFromCatalog
+    ? `Delivery: $ ${catalog.deliveryUsd.toFixed(2)} por pedido (artículo "${config.delivery.itemName}" de la caja)`
+    : `⚠️ No se encontró el artículo "${config.delivery.itemName}" en la caja: delivery a $ ${catalog.deliveryUsd.toFixed(2)} (DELIVERY_FALLBACK_USD)`);
   console.log(bcv ? `Tasa BCV: ${bcv.rate} Bs/USD (${bcv.date})` : 'Tasa BCV no disponible');
   console.log(config.advisorPhone
     ? `Avisos al asesor: +${config.advisorPhone}`

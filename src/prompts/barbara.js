@@ -103,11 +103,8 @@ export const BUSINESS_INFO = `## 1. Identificación e Información General
 
 ## 4. Despacho y Logística
 - Modalidad de entrega: Únicamente mediante Servicio de Delivery en la zona de Lecumberry y áreas con cobertura.
-- Tarifas de delivery (se suman una sola vez por pedido):
-  • Delivery Botellón: $ 1.00 USD, si el pedido incluye Botellón de agua.
-  • Delivery General: $ 1.50 USD, si el pedido incluye cualquier otro producto (alimentos, ferretería, etc.).
-  • Si el pedido tiene botellón y otros productos, se cobran ambas tarifas.
-- Si preguntan por el costo del delivery, explica estas tarifas usando los montos en Bs. de "TARIFAS DE DELIVERY" del Catálogo de Productos (ya calculados a la Tasa BCV).
+- Tarifa de delivery: se cobra UNA sola vez por pedido, el mismo monto sin importar los productos (incluido el botellón).
+- Si preguntan por el costo del delivery, usa exactamente el monto de "TARIFA DE DELIVERY" del Catálogo de Productos (ya calculado a la Tasa BCV). Nunca inventes otra tarifa.
 
 ${FERRETERIA_INFO}
 

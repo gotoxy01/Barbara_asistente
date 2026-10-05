@@ -51,8 +51,10 @@ export const config = {
   timezone: process.env.TIMEZONE || 'America/Caracas',
   dbPath: process.env.DB_PATH || 'barbara.db',
   delivery: {
-    botellonUsd: Number(process.env.DELIVERY_BOTELLON_USD || 1.0),
-    generalUsd: Number(process.env.DELIVERY_GENERAL_USD || 1.5),
+    // Artículo del sistema de caja cuyo precio es el costo del delivery (uno por pedido)
+    itemName: process.env.DELIVERY_ITEM_NAME || 'Delivery costo',
+    // Solo si ese artículo no existe en el catálogo
+    fallbackUsd: Number(process.env.DELIVERY_FALLBACK_USD || 1.5),
   },
   pagoMovil: {
     telefono: process.env.PAGO_MOVIL_TELEFONO || '0414-3697834',
