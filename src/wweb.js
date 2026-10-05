@@ -85,6 +85,25 @@ function isCustomerChat(id) {
   return Boolean(id) && (id.endsWith('@c.us') || id.endsWith('@lid'));
 }
 
+const normalizeName = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+const watchedGroups = config.wweb.groupNames.map(normalizeName);
+const groupNames = new Map(); // id del grupo (@g.us) -> nombre
+
+/** Devuelve el nombre del grupo si es uno de los configurados en WWEB_GROUPS; si no, null. */
+async function watchedGroupName(msg) {
+  if (!watchedGroups.length) return null;
+  if (!groupNames.has(msg.from)) {
+    const chat = await client.getChatById(msg.from).catch(() => null) ?? await msg.getChat().catch(() => null);
+    if (!chat) {
+      console.warn(`No se pudo leer el nombre del grupo ${msg.from}.`);
+      return null;
+    }
+    groupNames.set(msg.from, chat.name ?? '');
+  }
+  const name = groupNames.get(msg.from);
+  return watchedGroups.includes(normalizeName(name)) ? name : null;
+}
+
 // ---------------------------------------------------------------------------
 // Envío (con registro de lo que envía el bot, para detectar cuando responde una persona)
 // ---------------------------------------------------------------------------
@@ -175,32 +194,34 @@ async function messageToText(msg) {
 // Mensajes entrantes
 // ---------------------------------------------------------------------------
 
-async function processIncoming(msg, phone) {
+/**
+ * @param {{ groupName?: string, chatId?: string }} [options] groupName: el mensaje se escribió en ese grupo;
+ *   chatId: chat PRIVADO donde se responde (en grupos, el del autor; nunca el del grupo).
+ */
+async function processIncoming(msg, phone, { groupName, chatId = msg.from } = {}) {
   if (!db.markProcessed(messageKey(msg))) return;
 
-  const chat = await getChatSafe(phone, msg.from);
-  chat?.sendSeen().catch(() => {});
+  const chat = await getChatSafe(phone, chatId);
+  if (!groupName) chat?.sendSeen().catch(() => {});
 
-  if (config.advisorPhone && phone === config.advisorPhone && msg.type === 'chat') {
+  if (!groupName && config.advisorPhone && phone === config.advisorPhone && msg.type === 'chat') {
     if (await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) return;
   }
 
+  let text = await messageToText(msg);
+  if (!text) return;
+  if (groupName) text = `[Mensaje escrito en el grupo "${groupName}"; respóndele por privado] ${text}`;
   chat?.sendStateTyping().catch(() => {});
-  const text = await messageToText(msg);
-  if (!text) {
-    chat?.clearState().catch(() => {});
-    return;
-  }
 
   const name = msg._data?.notifyName || (await msg.getContact().catch(() => null))?.pushname;
-  console.log(`[${phone}] Cliente: ${text.slice(0, 120)}`);
+  console.log(`[${phone}] Cliente${groupName ? ` (en el grupo "${groupName}")` : ''}: ${text.slice(0, 160)}`);
   const result = await handleCustomerMessage({ phone, name, text });
 
   if (result.paused && !result.reply) {
     console.log(`[${phone}] Chat pausado (atendido por una persona): Bárbara no responde. Para reactivarla escriba en "Mensajes para mí": #reanudar ${phone}`);
   }
   if (result.reply) {
-    await sendToPhone(phone, result.reply, msg.from);
+    await sendToPhone(phone, result.reply, chatId);
     console.log(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
   }
   chat?.clearState().catch(() => {});
@@ -211,8 +232,24 @@ function debugEvent(event, msg) {
   console.log(`[debug ${event}] type=${msg.type} fromMe=${msg.fromMe} from=${msg.from} to=${msg.to} body=${String(msg.body ?? '').slice(0, 40)}`);
 }
 
+/** En los grupos configurados Bárbara atiende al autor del mensaje por PRIVADO; nunca escribe en el grupo. */
+async function handleGroupMessage(msg) {
+  if (msg.fromMe || !msg.author || !['chat', 'ptt', 'audio'].includes(msg.type) || isStale(msg)) return;
+  const groupName = await watchedGroupName(msg);
+  if (!groupName) return;
+
+  const author = serializeId(msg.author);
+  const phone = await resolvePhone(author);
+  if (!phone || phone === getOwnPhone() || phone === config.advisorPhone) return;
+  enqueue(phone, () => processIncoming(msg, phone, { groupName, chatId: author }));
+}
+
 client.on('message', async (msg) => {
   debugEvent('message', msg);
+  if (msg.from?.endsWith('@g.us')) {
+    await handleGroupMessage(msg).catch((err) => console.error('Error con un mensaje del grupo:', err.message));
+    return;
+  }
   if (msg.fromMe || msg.isStatus || !isCustomerChat(msg.from) || !['chat', 'ptt', 'audio', 'image', 'document', 'video', 'location', 'sticker', 'vcard', 'multi_vcard', 'buttons_response', 'list_response'].includes(msg.type)) return;
   const phone = await resolvePhone(msg.from);
   chatIdByPhone.set(phone, msg.from);
@@ -293,6 +330,13 @@ client.on('ready', async () => {
   const bcv = await getBcvRate();
   console.log(`\n✅ Bárbara conectada a WhatsApp como +${getOwnPhone()}`);
   console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
+  if (catalog.source.startsWith('json')) {
+    console.warn(
+      '⚠️ ATENCIÓN: Bárbara está usando el catálogo de PRUEBA (data/products.json), no el inventario real de la caja.\n' +
+      '   Copie el archivo database.db a la carpeta del proyecto (git no lo copia) o configure CATALOG_DB_PATH en .env.',
+    );
+  }
+  if (watchedGroups.length) console.log(`Grupos atendidos por privado: ${config.wweb.groupNames.join(', ')}`);
   console.log(catalog.deliveryFromCatalog
     ? `Delivery: $ ${catalog.deliveryUsd.toFixed(2)} por pedido (artículo "${config.delivery.itemName}" de la caja)`
     : `⚠️ No se encontró el artículo "${config.delivery.itemName}" en la caja: delivery a $ ${catalog.deliveryUsd.toFixed(2)} (DELIVERY_FALLBACK_USD)`);

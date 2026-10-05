@@ -8,15 +8,6 @@ function required(name) {
   return value;
 }
 
-/** Acepta "0414-3697834" o "584143697834": devuelve el número para mostrar y el internacional para wa.me. */
-function ferreteriaContact(raw) {
-  const digits = String(raw).replace(/\D/g, '');
-  if (!digits) return null;
-  const international = digits.startsWith('0') ? `58${digits.slice(1)}` : digits;
-  const display = digits.startsWith('0') ? `${digits.slice(0, 4)}-${digits.slice(4)}` : `+${digits}`;
-  return { display, international };
-}
-
 export const config = {
   port: Number(process.env.PORT || 3000),
   wweb: {
@@ -26,6 +17,8 @@ export const config = {
       || path.join(process.env.LOCALAPPDATA || os.homedir(), 'barbara-los-cuchos', 'wwebjs_auth'),
     headless: !/^(0|false|no)$/i.test(process.env.WWEB_HEADLESS || 'true'),
     debug: /^(1|true|si|sí|yes)$/i.test(process.env.WWEB_DEBUG || 'true'),
+    // Grupos donde Bárbara atiende a quien escribe, pero siempre respondiéndole por privado.
+    groupNames: (process.env.WWEB_GROUPS ?? 'Bodega los cuchos').split(',').map((g) => g.trim()).filter(Boolean),
   },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN || '',
@@ -61,8 +54,6 @@ export const config = {
     cedula: process.env.PAGO_MOVIL_CEDULA || '29953424',
     banco: process.env.PAGO_MOVIL_BANCO || 'Banesco',
   },
-  // Asesor de ferretería: Bárbara le pasa este contacto al cliente que pide artículos de ferretería.
-  ferreteria: ferreteriaContact(process.env.FERRETERIA_PHONE ?? '0414-3697834'),
   // Minutos que Bárbara se queda callada en un chat cuando un asesor escribe a mano (luego se reactiva sola).
   manualPauseMinutes: Number(process.env.MANUAL_PAUSE_MINUTES || 5),
   // Horas sin hablar con Bárbara para considerar que el cliente inicia una conversación nueva (y ella se presenta).

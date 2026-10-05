@@ -3,12 +3,14 @@ import * as db from '../db.js';
 import { sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
-import { applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
 
 const HELP =
   '*Comandos del asesor*\n' +
-  '#precio <monto>: precio en USD de lo que pesó (responda a la alerta de caja)\n' +
+  '#precio <monto>: precio en USD de lo que pesó o consultó (responda a la alerta de caja)\n' +
   '#precio <teléfono> <monto>: igual, indicando el cliente\n' +
+  '#nohay: avisar al cliente que no hay lo que consultó (responda a la alerta de caja)\n' +
+  '#nohay <teléfono>: igual, indicando el cliente\n' +
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
   '#pausar <teléfono>: pausar a Bárbara en ese chat\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
@@ -33,21 +35,34 @@ async function handlePrice(body, quotedBody) {
     return;
   }
 
-  let phone = match[1] || phoneFromAlert(quotedBody);
-  if (!phone) {
-    const waiting = db.getOrdersAwaitingWeight();
-    if (waiting.length === 1) phone = waiting[0].phone;
-    else if (!waiting.length) {
-      await notifyAdvisor('No hay clientes esperando un pesaje.');
-      return;
-    } else {
-      const list = waiting.map((o) => `• +${o.phone}: ${pendingWeighItems(o.items).map((i) => i.detalle).join('; ')}`).join('\n');
-      await notifyAdvisor(`Hay varios clientes esperando pesaje:\n${list}\n\nResponda a la alerta de ese cliente, o escriba: #precio <teléfono> <monto>`);
-      return;
-    }
-  }
+  const phone = await pendingCustomer(match[1], quotedBody, '#precio <teléfono> <monto>');
+  if (!phone) return;
+  await deliverToCustomer(phone, applyWeighedPrice(phone, usd, await getBcvRate()), `✅ Precio $ ${usd.toFixed(2)} enviado a +${phone}.`);
+}
 
-  const result = applyWeighedPrice(phone, usd, await getBcvRate());
+async function handleNotAvailable(body, quotedBody) {
+  const explicit = body.match(/^#nohay\s+\+?(\d{8,15})\s*$/i)?.[1];
+  const phone = await pendingCustomer(explicit, quotedBody, '#nohay <teléfono>');
+  if (!phone) return;
+  await deliverToCustomer(phone, applyNotAvailable(phone, await getBcvRate()), `✅ Se le avisó a +${phone} que no hay disponible.`);
+}
+
+/** Cliente al que va dirigido el comando: el indicado, el de la alerta citada o el único que está esperando. */
+async function pendingCustomer(explicitPhone, quotedBody, usage) {
+  const phone = explicitPhone || phoneFromAlert(quotedBody);
+  if (phone) return phone;
+  const waiting = db.getOrdersAwaitingWeight();
+  if (waiting.length === 1) return waiting[0].phone;
+  if (!waiting.length) {
+    await notifyAdvisor('No hay clientes esperando un pesaje o consulta.');
+    return null;
+  }
+  const list = waiting.map((o) => `• +${o.phone}: ${pendingWeighItems(o.items).map((i) => i.detalle).join('; ')}`).join('\n');
+  await notifyAdvisor(`Hay varios clientes esperando:\n${list}\n\nResponda a la alerta de ese cliente, o escriba: ${usage}`);
+  return null;
+}
+
+async function deliverToCustomer(phone, result, confirmation) {
   if (result.error) {
     await notifyAdvisor(`❌ ${result.error}`);
     return;
@@ -55,9 +70,9 @@ async function handlePrice(body, quotedBody) {
   try {
     await sendMessage(phone, result.message);
     db.addMessage(phone, 'model', result.message);
-    await notifyAdvisor(`✅ Precio $ ${usd.toFixed(2)} enviado a +${phone}.`);
+    await notifyAdvisor(confirmation);
   } catch (err) {
-    await notifyAdvisor(`❌ No se pudo enviar el precio a +${phone}: ${err.message}`);
+    await notifyAdvisor(`❌ No se pudo enviar el mensaje a +${phone}: ${err.message}`);
   }
 }
 
@@ -71,6 +86,10 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   const text = String(body ?? '').trim();
   if (/^#precio\b/i.test(text)) {
     await handlePrice(text, quotedBody);
+    return true;
+  }
+  if (/^#no\s?hay\b/i.test(text)) {
+    await handleNotAvailable(text.replace(/^#no\s?hay/i, '#nohay'), quotedBody);
     return true;
   }
 

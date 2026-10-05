@@ -18,7 +18,7 @@ import {
 } from './orderService.js';
 
 const WAITING_WEIGHT_REPLY =
-  'En cuanto el encargado termine de pesar, le envío la boleta completa con el total. ¡Un momento por favor! ⚖️';
+  'En cuanto el encargado en caja me confirme el precio, le envío la boleta completa con el total. ¡Un momento por favor! ⏳';
 
 const ATTACHMENT_RE = /^\[El cliente adjuntó (una imagen|un documento)/;
 
@@ -57,6 +57,8 @@ function isPauseExpired(chat) {
   return Date.now() - chat.paused_at > config.pauseHours * 3600 * 1000;
 }
 
+const GROUP_PREFIX_RE = /^\[Mensaje escrito en el grupo [^\]]*\]\s*/;
+
 /**
  * Busca productos para todos los mensajes del cliente que Bárbara aún no ha respondido
  * (p. ej. preguntas enviadas mientras el chat estaba pausado o varias seguidas).
@@ -68,7 +70,7 @@ function buildProductContext(history, bcv) {
   const pending = history
     .slice(lastReply + 1)
     .filter((m) => m.role === 'user' && !m.content.startsWith('[El cliente'))
-    .map((m) => m.content)
+    .map((m) => m.content.replace(GROUP_PREFIX_RE, ''))
     .slice(-5);
 
   let result = searchProducts(pending, { bcv });
@@ -76,7 +78,7 @@ function buildProductContext(history, bcv) {
   if (result.type === 'none' && result.terms.length === 0 && pending.length) {
     const previous = history.slice(0, lastReply + 1).reverse().find((m) => m.role === 'user');
     if (previous) {
-      const retry = searchProducts(`${previous.content} ${pending.join(' ')}`, { bcv });
+      const retry = searchProducts(`${previous.content.replace(GROUP_PREFIX_RE, '')} ${pending.join(' ')}`, { bcv });
       if (retry.type === 'matches') result = retry;
     }
   }
@@ -159,10 +161,10 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
 
   db.addMessage(phone, 'model', reply);
 
-  if (tools.state.weighed.length) {
+  if (tools.state.weighed.length || tools.state.consulted.length) {
     const order = db.getActiveOrder(phone);
-    const details = order ? pendingWeighItems(order.items).map((i) => i.detalle) : [];
-    if (details.length) await notify(renderWeighAlert({ phone, name: displayName, details }));
+    const items = order ? pendingWeighItems(order.items) : [];
+    if (items.length) await notify(renderWeighAlert({ phone, name: displayName, items }));
   }
 
   if (escalated) {
@@ -211,15 +213,16 @@ function applyOrderFlow(text, state) {
     return reply;
   }
 
-  // Mientras el encargado pesa, el cliente espera: no se le pregunta si desea algo más.
-  if (state.weighed.length) {
+  // Mientras el encargado pesa o consulta, el cliente espera: no se le pregunta si desea algo más.
+  if (state.weighed.length || state.consulted.length) {
     reply = reply.split(MORE_ITEMS_QUESTION).join('').trim();
-    if (!/balanza/i.test(reply)) reply = `${reply}\n\n${renderWeighWaitMessage(state.weighed, state.catalogAdded)}`.trim();
+    const explained = (!state.weighed.length || /balanza/i.test(reply)) && (!state.consulted.length || /encargado/i.test(reply));
+    if (!explained) reply = `${reply}\n\n${renderWeighWaitMessage(state.weighed, state.catalogAdded, state.consulted)}`.trim();
     return reply;
   }
   if (state.waitingWeight) {
     reply = reply.split(MORE_ITEMS_QUESTION).join('').trim();
-    if (!/pes(ar|e|ando|aje)/i.test(reply)) reply = `${reply}\n\n${WAITING_WEIGHT_REPLY}`.trim();
+    if (!/pes(ar|e|ando|aje)|encargado/i.test(reply)) reply = `${reply}\n\n${WAITING_WEIGHT_REPLY}`.trim();
     return reply;
   }
 

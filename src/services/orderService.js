@@ -33,7 +33,7 @@ const SEPARATOR = '--------------------------------------------------';
 // ---------------------------------------------------------------------------
 
 function itemLabel(item) {
-  if (item.pesable) return `⚖️ ${item.detalle}`;
+  if (item.pesable) return `${item.consulta ? '🔎' : '⚖️'} ${item.detalle}`;
   const qty = /kilo/i.test(item.presentacion) ? `${item.cantidad} kg` : `${item.cantidad}x`;
   return `${qty} ${item.nombre} (${item.presentacion})`;
 }
@@ -101,9 +101,11 @@ export function renderOrderContext(phone, bcv) {
   return [
     `Estado: ${status}`,
     ...[...t.lines, ...t.fees].map((l) => `- ${l.label}: ${money(l.usd, l.bs)}`),
-    ...t.pending.map((d) => `- ⚖️ ${d}: PENDIENTE DE PESAJE (el encargado en caja lo está pesando; aún no tiene precio)`),
-    `Total actual${t.pending.length ? ' (sin los productos por pesar)' : ''}: ${money(t.totalUsd, t.totalBs)}`,
-    ...(order.boleta_pendiente ? ['El cliente ya pidió cerrar el pedido: la boleta se enviará sola en cuanto llegue el precio del pesaje.'] : []),
+    ...pendingWeighItems(order.items).map((i) => (i.consulta
+      ? `- 🔎 ${i.detalle}: PENDIENTE DE CONSULTA (el encargado en caja está verificando disponibilidad y precio)`
+      : `- ⚖️ ${i.detalle}: PENDIENTE DE PESAJE (el encargado en caja lo está pesando; aún no tiene precio)`)),
+    `Total actual${t.pending.length ? ' (sin los productos pendientes del encargado)' : ''}: ${money(t.totalUsd, t.totalBs)}`,
+    ...(order.boleta_pendiente ? ['El cliente ya pidió cerrar el pedido: la boleta se enviará sola en cuanto el encargado envíe el precio.'] : []),
   ].join('\n');
 }
 
@@ -113,27 +115,74 @@ export function renderOrderContext(phone, bcv) {
 
 const joinNames = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', ')} y ${names.at(-1)}` : names[0]);
 
-/** Mensaje al cliente mientras el encargado pesa. */
-export function renderWeighWaitMessage(productNames, hasCatalogItems) {
-  const plural = productNames.length > 1;
-  return `¡Excelente!${hasCatalogItems ? ' Ya tengo anotados sus productos de catálogo.' : ''} ` +
-    `Como *${joinNames(productNames)}* se ${plural ? 'venden' : 'vende'} por peso exacto, le acabo de pedir al encargado en caja ` +
-    `que ${plural ? 'los' : 'lo'} pese en la balanza para darle el monto exacto. ¡Un momento por favor! ⚖️`;
+/**
+ * Mensaje al cliente mientras el encargado pesa (frutas, verduras...) o consulta (ferretería, farmacia).
+ * @param {string[]} weighedNames productos por pesar
+ * @param {boolean} hasCatalogItems si en el mismo turno se agregaron productos de catálogo
+ * @param {string[]} [consultedNames] productos de ferretería/farmacia consultados al encargado
+ */
+export function renderWeighWaitMessage(weighedNames, hasCatalogItems, consultedNames = []) {
+  const parts = [`¡Excelente!${hasCatalogItems ? ' Ya tengo anotados sus productos de catálogo.' : ''}`];
+  if (weighedNames.length) {
+    const plural = weighedNames.length > 1;
+    parts.push(
+      `Como *${joinNames(weighedNames)}* se ${plural ? 'venden' : 'vende'} por peso exacto, le acabo de pedir al encargado en caja ` +
+      `que ${plural ? 'los' : 'lo'} pese en la balanza para darle el monto exacto. ⚖️`,
+    );
+  }
+  if (consultedNames.length) {
+    parts.push(
+      `Ya le consulté al encargado en caja la disponibilidad y el precio de *${joinNames(consultedNames)}*; ` +
+      'en cuanto me confirme, le aviso por aquí. 🔎',
+    );
+  }
+  parts.push('¡Un momento por favor!');
+  return parts.join(' ');
 }
 
 /** Alerta para el personal de tienda ("Mensajes para mí"). Incluye TODO lo pendiente de ese cliente. */
-export function renderWeighAlert({ phone, name, details }) {
+export function renderWeighAlert({ phone, name, items }) {
+  const onlyConsult = items.every((i) => i.consulta);
+  const anyConsult = items.some((i) => i.consulta);
   return [
-    '⚠️ *ATENCIÓN EN CAJA - PESAR O COTIZAR*',
+    onlyConsult ? '⚠️ *ATENCIÓN EN CAJA - CONSULTAR DISPONIBILIDAD Y PRECIO*' : '⚠️ *ATENCIÓN EN CAJA - PESAR O COTIZAR*',
     `• *Cliente:* +${phone}${name ? ` (${name})` : ''}`,
-    `• *Pidió:* ${details.join('; ')}`,
+    `• *Pidió:* ${items.map((i) => `${i.consulta ? '🔎' : '⚖️'} ${i.detalle}`).join('; ')}`,
     '',
     '👉 *¿Qué debes hacer?*',
-    'Pesa el producto en la balanza y responde a este mensaje (deslízalo a la derecha) escribiendo el precio total en dólares así:',
+    onlyConsult
+      ? 'Verifica si lo tenemos y responde a este mensaje (deslízalo a la derecha) escribiendo el precio total en dólares así:'
+      : `Pesa ${anyConsult ? 'o verifica ' : ''}el producto y responde a este mensaje (deslízalo a la derecha) escribiendo el precio total en dólares así:`,
     '#precio [monto]',
     '',
-    `_(Ejemplo: Si ${details.length > 1 ? 'todo pesa' : 'el producto pesa'} $1.50 dólares, responde solo: #precio 1.50)_`,
+    `_(Ejemplo: Si ${items.length > 1 ? 'todo suma' : 'el producto cuesta'} $1.50 dólares, responde solo: #precio 1.50)_`,
+    ...(anyConsult ? ['', 'Si NO lo tenemos disponible, responde a este mensaje: #nohay'] : []),
   ].join('\n');
+}
+
+/** Tras resolver los pendientes: si el cliente ya había cerrado el pedido, se envía la boleta; si no, se pregunta si desea algo más. */
+function closePending(order, header, bcv) {
+  if (order.boleta_pendiente && order.items.length) {
+    const t = computeTotals(order.items, bcv);
+    Object.assign(order, { status: 'boleta', boleta_pendiente: 0, total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
+    db.saveOrder(order);
+    return { order, message: `${header}\n\n${renderBoleta(order.items, bcv)}\n\n${renderPagoMovil()}\n\n${ADDRESS_QUESTION}` };
+  }
+  order.boleta_pendiente = 0;
+  db.saveOrder(order);
+  const closing = order.items.length ? MORE_ITEMS_QUESTION : '¿Le puedo ayudar con algún otro producto? 😊';
+  return { order, message: `${header}\n\n${closing}` };
+}
+
+/** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
+export function applyNotAvailable(phone, bcv) {
+  const order = db.getActiveOrder(phone);
+  const pending = order ? pendingWeighItems(order.items) : [];
+  if (!pending.length) return { error: `+${phone} no tiene productos pendientes de consulta.` };
+
+  order.items = order.items.filter((i) => i.precio != null);
+  const header = `Disculpe, el encargado en caja me confirma que por ahora *no tenemos disponible*: ${pending.map((i) => i.detalle).join(', ')}. 😔`;
+  return closePending(order, header, bcv);
 }
 
 /**
@@ -146,20 +195,19 @@ export function applyWeighedPrice(phone, usd, bcv) {
   if (!pending.length) return { error: `+${phone} no tiene productos pendientes por pesar.` };
 
   const detalle = pending.map((i) => i.detalle).join(', ');
+  const consulta = pending.every((i) => i.consulta);
   order.items = order.items.filter((i) => i.precio != null);
-  order.items.push({ nombre: 'Productos pesados', presentacion: 'pesado en tienda', detalle, precio: round2(usd), cantidad: 1, pesable: true, botellon: false });
+  order.items.push({
+    nombre: consulta ? 'Productos consultados' : 'Productos pesados',
+    presentacion: consulta ? 'confirmado en tienda' : 'pesado en tienda',
+    detalle, precio: round2(usd), cantidad: 1, pesable: true, consulta, botellon: false,
+  });
 
   const price = bcv ? `Bs. ${toBolivares(usd, bcv.rate).toFixed(2)} (o $ ${usd.toFixed(2)} USD)` : `$ ${usd.toFixed(2)} USD`;
-  const header = `✅ ¡Listo! Ya pesamos sus productos:\n• ⚖️ *${detalle}*: ${price}`;
-
-  if (order.boleta_pendiente) {
-    const t = computeTotals(order.items, bcv);
-    Object.assign(order, { status: 'boleta', boleta_pendiente: 0, total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
-    db.saveOrder(order);
-    return { order, message: `${header}\n\n${renderBoleta(order.items, bcv)}\n\n${renderPagoMovil()}\n\n${ADDRESS_QUESTION}` };
-  }
-  db.saveOrder(order);
-  return { order, message: `${header}\n\n${MORE_ITEMS_QUESTION}` };
+  const header = consulta
+    ? `✅ ¡Listo! El encargado confirmó que sí lo tenemos y lo anoté en su pedido:\n• 🔎 *${detalle}*: ${price}`
+    : `✅ ¡Listo! Ya pesamos sus productos:\n• ⚖️ *${detalle}*: ${price}`;
+  return closePending(order, header, bcv);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +237,19 @@ export const ORDER_TOOL_DECLARATIONS = [
         cantidad: { type: Type.STRING, description: 'Cantidad tal como la pidió el cliente. Ej: "5 unidades", "1 trozo", "medio kilo aprox."' },
       },
       required: ['producto', 'cantidad'],
+    },
+  },
+  {
+    name: 'consultar_encargado',
+    description: 'Consulta al encargado en caja la disponibilidad y el precio de un artículo de FERRETERÍA (tornillos, clavos, herramientas, pintura, tubos, conexiones, cables, bombillos, cerraduras, materiales...) o de FARMACIA (medicamentos, pastillas, jarabes, analgésicos, antigripales, antibióticos, vitaminas, cremas medicinales...). Úsala SIEMPRE para esos artículos, aunque aparezcan en el catálogo, una vez por cada artículo. El encargado responde con el precio o indica que no hay.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        producto: { type: Type.STRING, description: 'Artículo tal como lo pidió el cliente, con marca/medida/miligramos si los dio. Ej: "Acetaminofén 500mg", "tornillos de 2 pulgadas"' },
+        cantidad: { type: Type.STRING, description: 'Cantidad tal como la pidió el cliente. Ej: "1 caja", "2 blísteres", "10 unidades". Vacío si solo pregunta si hay.' },
+        tipo: { type: Type.STRING, enum: ['ferreteria', 'farmacia'], description: 'Tipo de artículo' },
+      },
+      required: ['producto', 'tipo'],
     },
   },
   {
@@ -247,7 +308,7 @@ function optionsList(options) {
 export function createOrderTools({ phone, name, bcv, notify }) {
   const state = {
     cartChanged: false, catalogAdded: false, boleta: null, addressSaved: false,
-    missingHouseNumber: false, weighed: [], waitingWeight: false,
+    missingHouseNumber: false, weighed: [], consulted: [], waitingWeight: false,
   };
 
   const handlers = {
@@ -288,6 +349,27 @@ export function createOrderTools({ phone, name, bcv, notify }) {
       };
     },
 
+    consultar_encargado({ producto, cantidad, tipo }) {
+      const nombre = String(producto ?? '').trim();
+      if (!nombre) return { error: 'Indique el artículo a consultar.' };
+      const qty = String(cantidad ?? '').trim();
+      const detalle = qty ? `${nombre} (${qty})` : nombre;
+      const order = db.getOrCreateActiveOrder(phone);
+      order.items.push({
+        nombre, presentacion: tipo === 'farmacia' ? 'farmacia' : 'ferretería', detalle,
+        precio: null, cantidad: 1, pesable: true, consulta: true, botellon: false,
+      });
+      order.status = 'abierto';
+      db.saveOrder(order);
+      state.cartChanged = true;
+      state.consulted.push(nombre);
+      return {
+        ok: true,
+        consultado_al_encargado: detalle,
+        instruccion: 'El sistema avisa al encargado y envía al cliente el mensaje de espera. No des precio ni confirmes disponibilidad de este artículo; espera la respuesta del encargado.',
+      };
+    },
+
     quitar_producto({ producto, cantidad }) {
       const order = db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'El pedido está vacío.' };
@@ -324,8 +406,8 @@ export function createOrderTools({ phone, name, bcv, notify }) {
         db.saveOrder(order);
         state.waitingWeight = true;
         return {
-          error: 'Hay productos esperando el pesaje del encargado.',
-          instruccion: 'Dile al cliente que en cuanto el encargado termine de pesar le enviamos la boleta completa con el total. No escribas [BOLETA].',
+          error: 'Hay productos esperando el precio del encargado (pesaje o consulta).',
+          instruccion: 'Dile al cliente que en cuanto el encargado en caja confirme el precio le enviamos la boleta completa con el total. No escribas [BOLETA].',
         };
       }
       const t = computeTotals(order.items, bcv);

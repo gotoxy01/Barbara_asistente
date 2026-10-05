@@ -289,9 +289,51 @@ function rankProducts(query, products) {
   return { terms: terms.map((t) => t.word), ranked };
 }
 
+const nameHasTerm = (p, term) => term.variants.some((v) => p.nameTokens.some((t) => term.matcher(v, t)));
+const nameIsTerm = (p, term) => p.nameTokens.every((t) => term.variants.some((v) => term.matcher(v, t)));
+
+/**
+ * Si el cliente pregunta por un producto genérico ("plátano", "tomate") y existe un producto que se llama
+ * exactamente así, se prioriza ese y se descartan los derivados (pasta de tomate, ketchup, bocadillos...).
+ * Con varios productos en un mismo mensaje, cada uno tiene su propio cupo y se reportan los que no existen.
+ */
 function matchQuery(query, products) {
-  const { terms, ranked } = rankProducts(query, products);
-  return { terms, matches: ranked.slice(0, config.catalog.maxResults).map((r) => r.p) };
+  const max = config.catalog.maxResults;
+  const terms = queryTerms(query, products);
+  if (!terms.length) return { terms: [], matches: [], missing: [] };
+
+  const ranked = products
+    .map((p) => ({ p, score: scoreProduct(p, terms) }))
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score || a.p.nombre.length - b.p.nombre.length);
+  const byLength = (a, b) => a.nombre.length - b.nombre.length;
+
+  const perTerm = terms.map((term) => {
+    const hits = products.filter((p) => nameHasTerm(p, term)).sort(byLength);
+    const exact = hits.filter((p) => nameIsTerm(p, term));
+    return { term, exact, hits };
+  });
+
+  if (terms.length === 1) {
+    const { exact, hits } = perTerm[0];
+    const matches = exact.length
+      ? [...exact, ...hits.filter((p) => !exact.includes(p)).slice(0, 3)]
+      : ranked.slice(0, max).map((r) => r.p);
+    return { terms: [terms[0].word], matches, missing: matches.length ? [] : [terms[0].word] };
+  }
+
+  // Palabras que forman juntas un mismo producto ("harina pan") se resuelven con el ranking normal.
+  const combined = ranked.filter((r) => r.score >= 2).map((r) => r.p);
+  const loose = perTerm.filter(({ term }) => !combined.some((p) => nameHasTerm(p, term)));
+  const perTermLimit = Math.max(2, Math.floor(max / terms.length));
+  const matches = loose.length
+    ? [...new Set([
+        ...combined.slice(0, max),
+        ...loose.flatMap(({ exact, hits }) => (exact.length ? exact : hits.slice(0, perTermLimit))),
+      ])]
+    : ranked.slice(0, max).map((r) => r.p);
+  const missing = loose.filter(({ hits }) => !hits.length).map(({ term }) => term.word);
+  return { terms: terms.map((t) => t.word), matches, missing };
 }
 
 /**
@@ -328,7 +370,7 @@ export function searchProducts(queries, { bcv = null } = {}) {
 
   const terms = [...new Set(results.flatMap((r) => r.terms))];
   const found = results.filter((r) => r.matches.length);
-  const missing = results.filter((r) => !r.matches.length);
+  const missingWords = [...new Set(results.flatMap((r) => r.missing))];
   const lines = [rateLine(bcv)];
 
   if (found.length) {
@@ -340,8 +382,11 @@ export function searchProducts(queries, { bcv = null } = {}) {
       if (found.length > 1) lines.push(`Para "${r.terms.join(' ')}":`);
       lines.push(...fresh.map((p) => formatProduct(p, bcv)));
     }
-    if (missing.length) {
-      lines.push(`No están en el catálogo: ${missing.map((r) => `"${r.terms.join(' ')}"`).join(', ')}.`);
+    if (missingWords.length) {
+      lines.push(
+        `SIN COINCIDENCIAS EN EL CATÁLOGO: ${missingWords.map((w) => `"${w}"`).join(', ')}. ` +
+        'Si alguna de estas palabras es un producto que el cliente pidió, NO lo tenemos disponible por ahora.',
+      );
     }
     lines.push(BCV_NOTE);
     return { type: 'matches', terms, products: [...shown], text: lines.join('\n') };
