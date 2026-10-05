@@ -8,6 +8,7 @@ import {
   ADDRESS_QUESTION,
   BOLETA_MARKER,
   createOrderTools,
+  HOUSE_NUMBER_REMINDER,
   MORE_ITEMS_QUESTION,
   pendingWeighItems,
   renderDeliveryFees,
@@ -143,6 +144,10 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
   let model;
   try {
     const result = await generateBarbaraReply(systemPrompt, history, tools);
+    if (result.ignore && !tools.state.cartChanged) {
+      console.log(`[${phone}] Mensaje ajeno a la bodega (proveedor, cobro, spam...): Bárbara no responde.`);
+      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model };
+    }
     reply = enforceBusinessName(applyOrderFlow(result.text, tools.state)) || EMPTY_ESCALATION_REPLY;
     if (isNewConversation && !/b[aá]rbara/i.test(reply)) reply = `${INTRO}\n\n${reply}`;
     escalated = result.escalate;
@@ -200,6 +205,11 @@ function applyOrderFlow(text, state) {
 
   reply = reply.split(BOLETA_MARKER).join('').trim()
     .replace(/¿[^¿?]*(?:sería|seria) todo(?: por hoy)?\?\s*(?:🛒)?/gi, MORE_ITEMS_QUESTION);
+
+  if (state.missingHouseNumber && !state.addressSaved) {
+    if (!/n[uú]mero de casa/i.test(reply)) reply = `${reply}\n\n${HOUSE_NUMBER_REMINDER}`.trim();
+    return reply;
+  }
 
   // Mientras el encargado pesa, el cliente espera: no se le pregunta si desea algo más.
   if (state.weighed.length) {

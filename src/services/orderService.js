@@ -13,7 +13,17 @@ export function renderPagoMovil() {
   return `📲 *Datos para Pago Móvil:*\n• Tlf: ${telefono}\n• C.I.: ${cedula}\n• Banco: ${banco}`;
 }
 export const ADDRESS_QUESTION =
-  'Para proceder con el envío, por favor indíquenos su dirección exacta o número de casa/apto y un punto de referencia. 🏠';
+  'Para proceder con el envío, por favor indíquenos su dirección exacta y un punto de referencia. 🏠\n\n' +
+  '⚠️ *Importante:* no olvide indicar su *número de casa* (o de apto/quinta); sin él no podemos finalizar su pedido.';
+
+export const HOUSE_NUMBER_REMINDER =
+  '⚠️ Para poder finalizar su pedido nos falta su *número de casa* (o de apto/quinta). 🏠\n\n' +
+  'Por favor, indíquenos su número de casa y en seguida cerramos su pedido.';
+
+/** La dirección debe traer número de casa/apto, nombre de quinta o un "sin número" explícito. */
+export function hasHouseNumber(address) {
+  return /\d/.test(address) || /\b(quinta|qta\.?)\s+\S+|\bs\/n\b|\bsin\s+n[uú]mero\b/i.test(address);
+}
 
 const round2 = (n) => Math.round(n * 100) / 100;
 const SEPARATOR = '--------------------------------------------------';
@@ -235,7 +245,10 @@ function optionsList(options) {
  * `state` registra lo ocurrido para que chatService ajuste la respuesta final.
  */
 export function createOrderTools({ phone, name, bcv, notify }) {
-  const state = { cartChanged: false, catalogAdded: false, boleta: null, addressSaved: false, weighed: [], waitingWeight: false };
+  const state = {
+    cartChanged: false, catalogAdded: false, boleta: null, addressSaved: false,
+    missingHouseNumber: false, weighed: [], waitingWeight: false,
+  };
 
   const handlers = {
     agregar_producto({ producto, cantidad }) {
@@ -329,7 +342,15 @@ export function createOrderTools({ phone, name, bcv, notify }) {
       const order = db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
       if (order.status !== 'boleta') return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
-      order.address = String(direccion ?? '').trim();
+      const address = String(direccion ?? '').trim();
+      if (!hasHouseNumber(address)) {
+        state.missingHouseNumber = true;
+        return {
+          error: 'La dirección no incluye el número de casa/apto.',
+          instruccion: 'NO registres el pedido todavía. Pide amablemente al cliente su número de casa (o apto/quinta) para poder finalizar el pedido.',
+        };
+      }
+      order.address = address;
       order.status = 'recibido';
       db.saveOrder(order);
       state.addressSaved = true;
@@ -341,7 +362,7 @@ export function createOrderTools({ phone, name, bcv, notify }) {
         `${renderBoleta(order.items, bcv)}\n\n` +
         `Escribirle: https://wa.me/${phone}`
       );
-      return { ok: true, pedido_numero: order.id, instruccion: 'Confirma al cliente que su pedido fue registrado e incluye los datos de Pago Móvil.' };
+      return { ok: true, pedido_numero: order.id, direccion: order.address, instruccion: 'Confirma al cliente que su pedido fue registrado e incluye los datos de Pago Móvil.' };
     },
   };
 
@@ -367,6 +388,7 @@ export function createOrderTools({ phone, name, bcv, notify }) {
     const address = calls.find((c) => c.name === 'registrar_direccion');
     if (address) {
       return `¡Muchas gracias${name ? `, ${name.split(' ')[0]}` : ''}! ✅ Su pedido *#${address.result.pedido_numero}* fue registrado con éxito.\n\n` +
+        `📍 *Dirección de entrega:* ${address.result.direccion}\n\n` +
         'Si paga por Pago Móvil, envíenos la captura del pago por este chat y de inmediato despachamos su pedido. 🛵\n' +
         'También puede pagar en efectivo (USD o Bs.) al recibir. ¡Gracias por preferir *Abasto Los Cuchos*! 🙏';
     }

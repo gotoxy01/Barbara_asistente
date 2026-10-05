@@ -5,6 +5,7 @@ import {
   BUSINESS_INFO,
   CATALOG_SECTION,
   ESCALATION_TAG,
+  IGNORE_TAG,
   KNOWLEDGE_BASE_MARKER,
   ORDER_SECTION,
   SESSION_SECTION,
@@ -198,8 +199,9 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
           kind: 'empty', retryable: false, hint: 'Gemini devolvió una respuesta vacía.' });
       }
       return {
-        text: raw.split(ESCALATION_TAG).join('').replace(/\n{3,}/g, '\n\n').trim(),
+        text: raw.split(ESCALATION_TAG).join('').split(IGNORE_TAG).join('').replace(/\n{3,}/g, '\n\n').trim(),
         escalate: raw.includes(ESCALATION_TAG),
+        ignore: raw.includes(IGNORE_TAG),
         model: turn.model,
         toolCalls,
       };

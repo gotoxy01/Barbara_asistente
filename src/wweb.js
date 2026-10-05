@@ -304,6 +304,13 @@ client.on('disconnected', (reason) => {
   setTimeout(() => start(), 10_000);
 });
 
+// Las llamadas (entrantes, salientes o perdidas) no pausan a Bárbara: solo los mensajes de texto
+// escritos a mano desde el teléfono del negocio la pausan.
+client.on('call', async (call) => {
+  const phone = await resolvePhone(serializeId(call.from)).catch(() => digits(serializeId(call.from)));
+  console.log(`📞 Llamada ${call.isVideo ? 'de video ' : ''}de +${phone}: Bárbara sigue activa en ese chat.`);
+});
+
 client.on('change_state', (state) => console.log(`Estado de WhatsApp: ${state}`));
 
 // ---------------------------------------------------------------------------
