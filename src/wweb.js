@@ -368,7 +368,7 @@ async function start(attempt = 1) {
     await client.initialize();
   } catch (err) {
     console.error(`No se pudo abrir WhatsApp Web (intento ${attempt} de ${MAX_START_ATTEMPTS}): ${err?.message ?? err}`);
-    if (err?.stack) console.error(err.stack.split('\n').slice(1, 6).join('\n'));
+    if (err?.stack) console.error(err.stack.split('\n').slice(1, 14).join('\n'));
     await client.destroy().catch(() => {});
     if (attempt < MAX_START_ATTEMPTS) {
       console.log('Reintentando en 15 s...');
