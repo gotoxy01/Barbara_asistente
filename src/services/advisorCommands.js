@@ -11,6 +11,8 @@ const HELP =
   '#precio <teléfono> <monto>: igual, indicando el cliente\n' +
   '#nohay: avisar al cliente que no hay lo que consultó (responda a la alerta de caja)\n' +
   '#nohay <teléfono>: igual, indicando el cliente\n' +
+  '#b: ver los pedidos pendientes\n' +
+  '#b <teléfono>: borrar el pedido pendiente de ese cliente\n' +
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
   '#pausar <teléfono>: pausar a Bárbara en ese chat\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
@@ -45,6 +47,51 @@ async function handleNotAvailable(body, quotedBody) {
   const phone = await pendingCustomer(explicit, quotedBody, '#nohay <teléfono>');
   if (!phone) return;
   await deliverToCustomer(phone, applyNotAvailable(phone, await getBcvRate()), `✅ Se le avisó a +${phone} que no hay disponible.`);
+}
+
+/** "0414-123.45.67", "+58 414 1234567" o "584141234567" -> "584141234567". */
+function normalizePhone(raw) {
+  const digits = String(raw ?? '').replace(/\D/g, '');
+  if (/^0\d{10}$/.test(digits)) return `58${digits.slice(1)}`;
+  if (/^4\d{9}$/.test(digits)) return `58${digits}`;
+  return digits;
+}
+
+function describeOrder(o) {
+  const count = o.items.length;
+  const total = o.total_usd != null ? ` - $ ${o.total_usd.toFixed(2)}` : '';
+  const state = { abierto: 'armando', boleta: 'boleta enviada', recibido: 'registrado' }[o.status] ?? o.status;
+  return `Pedido #${o.id} (${state}): ${count} producto${count === 1 ? '' : 's'}${total}`;
+}
+
+/** #b <teléfono>: cancela los pedidos sin cerrar del cliente. #b solo: lista los pedidos pendientes. */
+async function handleCancelOrder(args, quotedBody) {
+  const phone = normalizePhone(args) || phoneFromAlert(quotedBody);
+  if (!phone) {
+    const pending = db.getPendingOrders();
+    if (!pending.length) {
+      await notifyAdvisor('No hay pedidos pendientes.');
+      return;
+    }
+    const list = pending.map((o) => {
+      const name = db.getChat(o.phone)?.name;
+      return `• +${o.phone}${name ? ` (${name})` : ''}: ${describeOrder(o)}`;
+    }).join('\n');
+    await notifyAdvisor(`📋 *Pedidos pendientes (${pending.length})*\n${list}\n\nPara borrar uno escriba: #b <teléfono>`);
+    return;
+  }
+  if (phone.length < 10) {
+    await notifyAdvisor('Número inválido. Ejemplo: #b 04141234567');
+    return;
+  }
+
+  const cancelled = db.cancelPendingOrders(phone);
+  if (!cancelled.length) {
+    await notifyAdvisor(`+${phone} no tiene pedidos pendientes.`);
+    return;
+  }
+  console.log(`[${phone}] Pedido(s) cancelado(s) por el asesor: ${cancelled.map((o) => `#${o.id}`).join(', ')}`);
+  await notifyAdvisor(`🗑️ Pedido borrado para +${phone}:\n${cancelled.map((o) => `• ${describeOrder(o)}`).join('\n')}\n\nSi el cliente vuelve a escribir, empieza un pedido nuevo.`);
 }
 
 /** Cliente al que va dirigido el comando: el indicado, el de la alerta citada o el único que está esperando. */
@@ -90,6 +137,10 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   }
   if (/^#no\s?hay\b/i.test(text)) {
     await handleNotAvailable(text.replace(/^#no\s?hay/i, '#nohay'), quotedBody);
+    return true;
+  }
+  if (/^#b(orrar)?\b/i.test(text)) {
+    await handleCancelOrder(text.replace(/^#b(orrar)?/i, ''), quotedBody);
     return true;
   }
 

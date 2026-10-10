@@ -26,7 +26,7 @@ db.exec(`
     created_at    INTEGER NOT NULL
   );
 
-  -- status: abierto (armando el carrito) | boleta (boleta enviada, falta dirección) | recibido (con dirección)
+  -- status: abierto (armando el carrito) | boleta (boleta enviada, falta dirección) | recibido (con dirección) | cancelado (#b del asesor)
   CREATE TABLE IF NOT EXISTS orders (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     phone       TEXT NOT NULL,
@@ -68,6 +68,9 @@ const stmts = {
   markProcessed: db.prepare('INSERT OR IGNORE INTO processed_events (wa_message_id, created_at) VALUES (?, ?)'),
   activeOrder: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta') ORDER BY id DESC LIMIT 1`),
   activeOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta') ORDER BY id DESC`),
+  pendingOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta', 'recibido') AND items != '[]' ORDER BY id`),
+  pendingOrdersOf: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta', 'recibido') ORDER BY id`),
+  cancelOrder: db.prepare(`UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ? WHERE id = ?`),
   createOrder: db.prepare('INSERT INTO orders (phone, created_at, updated_at) VALUES (?, ?, ?)'),
   getOrder: db.prepare('SELECT * FROM orders WHERE id = ?'),
   updateOrder: db.prepare(`
@@ -120,6 +123,18 @@ export function getActiveOrder(phone) {
 /** Pedidos en curso con productos que el encargado aún no ha pesado. */
 export function getOrdersAwaitingWeight() {
   return stmts.activeOrders.all().map(parseOrder).filter((o) => o.items.some((i) => i.precio == null));
+}
+
+/** Pedidos sin cerrar de todos los clientes (armando, con boleta o registrados esperando despacho). */
+export function getPendingOrders() {
+  return stmts.pendingOrders.all().map(parseOrder);
+}
+
+/** Cancela los pedidos sin cerrar del cliente y devuelve los que se cancelaron. */
+export function cancelPendingOrders(phone) {
+  const orders = stmts.pendingOrdersOf.all(phone).map(parseOrder);
+  for (const o of orders) stmts.cancelOrder.run(Date.now(), o.id);
+  return orders;
 }
 
 export function getOrCreateActiveOrder(phone) {
