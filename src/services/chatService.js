@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { getSelfPhone, sendMessage } from '../messenger.js';
-import { buildSystemPrompt, generateBarbaraReply } from './aiService.js';
+import { buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { getBcvRate } from './bcvService.js';
 import { searchProducts } from './catalogService.js';
 import {
@@ -58,6 +58,50 @@ function isPauseExpired(chat) {
 }
 
 const GROUP_PREFIX_RE = /^\[Mensaje escrito en el grupo [^\]]*\]\s*/;
+
+/** Lo que escribió el cliente desde la última respuesta de Bárbara (sin marcas del sistema). */
+function pendingCustomerText(history) {
+  const lastReply = history.map((m) => m.role).lastIndexOf('model');
+  return history.slice(lastReply + 1)
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content.replace(GROUP_PREFIX_RE, ''))
+    .join('\n');
+}
+
+const HAND_OFF_RE = /(consult|ped|pid|solicit|avis)\w*\s+(al|a un|con el)\s+encargado|una persona de nuestro equipo/i;
+const HARDWARE_RE = /ferreter|tornill|clavo|llave de paso|tubo|teflon|teflón|pintura|cable|bombillo|cerradura|candado|herramienta|martillo|destornillador|alicate|cemento|silicon|brocha|rodillo|lija|manguera|codo|niple|breaker|enchufe|tomacorriente|interruptor|bisagra|taladro|mecha|cinta aislante/i;
+const WEIGH_CLAIM_RE = /pes(e|ar|ado|aje)|balanza/i;
+
+/**
+ * Gemini a veces le dice al cliente "ya le consulté al encargado" sin usar la herramienta, y el encargado
+ * nunca se entera. Si eso pasa, el sistema anota lo que pidió el cliente y envía la alerta igual.
+ */
+async function ensureHandOff(aiText, customerText, tools) {
+  const { state } = tools;
+  if (state.weighed.length || state.consulted.length || state.waitingWeight || state.boleta) return;
+  if (!HAND_OFF_RE.test(aiText) || !customerText.trim()) return;
+  const producto = customerText.replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (HARDWARE_RE.test(customerText)) await tools.execute('consultar_encargado', { producto, tipo: 'ferreteria' });
+  else if (WEIGH_CLAIM_RE.test(aiText)) await tools.execute('solicitar_pesaje', { producto, cantidad: '' });
+  else await tools.execute('consultar_encargado', { producto, tipo: 'farmacia' });
+  console.log(`Bárbara dijo que consultó al encargado sin usar la herramienta: se envió la alerta a caja igualmente.`);
+}
+
+const GREETING_RE = /^(hola+|ola|buen[oa]s?|buen d[ií]a|saludos|hey|epa|qu[eé] tal|bendici[oó]n|good|hi)\b/i;
+
+/** Un saludo siempre se responde, aunque la IA lo haya tomado por un mensaje ajeno a la bodega. */
+function isGreeting(text) {
+  const clean = text.replace(GROUP_PREFIX_RE, '').replace(/^[^\p{L}]+/u, '').trim();
+  return clean.length <= 60 && GREETING_RE.test(clean);
+}
+
+function greetingReply(text, isNewConversation) {
+  const group = text.match(/^\[Mensaje escrito en el grupo «?"?([^»"\];]+)/)?.[1];
+  const viaGroup = group ? ` Le escribo por privado por su mensaje en el grupo *${group.trim()}*.` : '';
+  return isNewConversation || group
+    ? `${greetingForNow()} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
+    : '¡Hola! ¿En qué le puedo ayudar? 😊';
+}
 
 /**
  * Busca productos para todos los mensajes del cliente que Bárbara aún no ha respondido
@@ -135,7 +179,7 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
   const bcv = await getBcvRate();
   const products = buildProductContext(history, bcv);
   const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
-  const tools = createOrderTools({ phone, name: displayName, bcv, notify });
+  const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText: pendingCustomerText(history) });
   const systemPrompt = buildSystemPrompt({
     name: displayName, phone, productContext, orderContext: renderOrderContext(phone, bcv), isNewConversation,
   });
@@ -144,19 +188,25 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
   let escalated;
   let toolCalls;
   let model;
+  const pendingBefore = pendingWeighItems(db.getActiveOrder(phone)?.items ?? []).length;
   try {
     const result = await generateBarbaraReply(systemPrompt, history, tools);
-    if (result.ignore && !tools.state.cartChanged) {
+    if (result.ignore && !tools.state.cartChanged && !isGreeting(text)) {
       console.log(`[${phone}] Mensaje ajeno a la bodega (proveedor, cobro, spam...): Bárbara no responde.`);
       return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model };
     }
-    reply = enforceBusinessName(applyOrderFlow(result.text, tools.state)) || EMPTY_ESCALATION_REPLY;
+    if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, pendingCustomerText(history), tools);
+    reply = result.ignore && !tools.state.cartChanged
+      ? greetingReply(text, isNewConversation)
+      : enforceBusinessName(applyOrderFlow(result.text, tools.state)) || EMPTY_ESCALATION_REPLY;
     if (isNewConversation && !/b[aá]rbara/i.test(reply)) reply = `${INTRO}\n\n${reply}`;
     escalated = result.escalate;
     toolCalls = result.toolCalls;
     model = result.model;
   } catch (error) {
-    return handleAiFailure({ phone, name: displayName, text, error, notify, productContext });
+    if (!isGreeting(text)) return handleAiFailure({ phone, name: displayName, text, error, notify, productContext });
+    console.error(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
+    reply = greetingReply(text, isNewConversation);
   }
 
   db.addMessage(phone, 'model', reply);
@@ -216,7 +266,11 @@ function applyOrderFlow(text, state) {
   // Mientras el encargado pesa o consulta, el cliente espera: no se le pregunta si desea algo más.
   if (state.weighed.length || state.consulted.length) {
     reply = reply.split(MORE_ITEMS_QUESTION).join('').trim();
-    const explained = (!state.weighed.length || /balanza/i.test(reply)) && (!state.consulted.length || /encargado/i.test(reply));
+    const hardware = state.consulted.some((c) => c.tipo !== 'farmacia');
+    const pharmacy = state.consulted.some((c) => c.tipo === 'farmacia');
+    const explained = (!state.weighed.length || /balanza/i.test(reply))
+      && (!pharmacy || /encargado/i.test(reply))
+      && (!hardware || /persona/i.test(reply));
     if (!explained) reply = `${reply}\n\n${renderWeighWaitMessage(state.weighed, state.catalogAdded, state.consulted)}`.trim();
     return reply;
   }

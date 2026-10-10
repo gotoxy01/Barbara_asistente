@@ -28,7 +28,7 @@ function nowInVenezuela() {
   }).format(new Date());
 }
 
-function greetingForNow() {
+export function greetingForNow() {
   const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: config.timezone, hour: 'numeric', hourCycle: 'h23' }).format(new Date()));
   if (hour < 12) return '¡Buenos días!';
   if (hour < 19) return '¡Buenas tardes!';

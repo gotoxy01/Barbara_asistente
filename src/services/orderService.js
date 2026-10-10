@@ -26,6 +26,25 @@ export function hasHouseNumber(address) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+const isSoldByWeight = (p) => /kilo|\bkg\b/i.test(p.presentacion);
+
+const plain = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/** El cliente habló de peso ("1 kilo", "medio kilo", "500 gr", "1/2", "2kg")? Si no, pidió unidades. */
+export function mentionsWeight(text) {
+  return /kilo|kg|\bk\b|gramo|\d\s*grs?\b|\bgrs?\b|\bmedio\b|\bcuarto\b|\d\s*\/\s*\d/i.test(text);
+}
+
+/**
+ * Revisa solo el fragmento donde el cliente nombra el producto ("1 kilo de tomate y 2 aguacates": el aguacate va por unidades).
+ * Si no lo nombra (ej. respondió "2" a "¿cuántos plátanos desea?"), revisa todo su mensaje.
+ */
+export function weightMentionedFor(productName, text) {
+  const stem = plain(productName).split(/\s+/)[0].slice(0, 5);
+  const related = String(text).split(/[,;\n]|\s+y\s+|\s+e\s+|\s+con\s+/i).filter((s) => plain(s).includes(stem));
+  return mentionsWeight(related.length ? related.join(' ') : text);
+}
 const SEPARATOR = '--------------------------------------------------';
 
 // ---------------------------------------------------------------------------
@@ -119,9 +138,11 @@ const joinNames = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', '
  * Mensaje al cliente mientras el encargado pesa (frutas, verduras...) o consulta (ferretería, farmacia).
  * @param {string[]} weighedNames productos por pesar
  * @param {boolean} hasCatalogItems si en el mismo turno se agregaron productos de catálogo
- * @param {string[]} [consultedNames] productos de ferretería/farmacia consultados al encargado
+ * @param {{ nombre: string, tipo: string }[]} [consulted] artículos de ferretería/farmacia consultados al encargado
  */
-export function renderWeighWaitMessage(weighedNames, hasCatalogItems, consultedNames = []) {
+export function renderWeighWaitMessage(weighedNames, hasCatalogItems, consulted = []) {
+  const hardware = consulted.filter((c) => c.tipo !== 'farmacia').map((c) => c.nombre);
+  const pharmacy = consulted.filter((c) => c.tipo === 'farmacia').map((c) => c.nombre);
   const parts = [`¡Excelente!${hasCatalogItems ? ' Ya tengo anotados sus productos de catálogo.' : ''}`];
   if (weighedNames.length) {
     const plural = weighedNames.length > 1;
@@ -130,11 +151,14 @@ export function renderWeighWaitMessage(weighedNames, hasCatalogItems, consultedN
       `que ${plural ? 'los' : 'lo'} pese en la balanza para darle el monto exacto. ⚖️`,
     );
   }
-  if (consultedNames.length) {
+  if (pharmacy.length) {
     parts.push(
-      `Ya le consulté al encargado en caja la disponibilidad y el precio de *${joinNames(consultedNames)}*; ` +
+      `Ya le consulté al encargado en caja la disponibilidad y el precio de *${joinNames(pharmacy)}*; ` +
       'en cuanto me confirme, le aviso por aquí. 🔎',
     );
+  }
+  if (hardware.length) {
+    parts.push(`Para su consulta de ferretería (*${joinNames(hardware)}*), en breve una persona de nuestro equipo le atenderá personalmente. 🔧`);
   }
   parts.push('¡Un momento por favor!');
   return parts.join(' ');
@@ -157,6 +181,9 @@ export function renderWeighAlert({ phone, name, items }) {
     '',
     `_(Ejemplo: Si ${items.length > 1 ? 'todo suma' : 'el producto cuesta'} $1.50 dólares, responde solo: #precio 1.50)_`,
     ...(anyConsult ? ['', 'Si NO lo tenemos disponible, responde a este mensaje: #nohay'] : []),
+    ...(items.some((i) => i.consulta && i.presentacion !== 'farmacia')
+      ? ['', `🔧 *Ferretería:* Bárbara le dijo al cliente que una persona lo atenderá en breve. Puede escribirle directamente: https://wa.me/${phone}`]
+      : []),
   ].join('\n');
 }
 
@@ -305,7 +332,7 @@ function optionsList(options) {
  * Crea el ejecutor de herramientas para un turno de conversación.
  * `state` registra lo ocurrido para que chatService ajuste la respuesta final.
  */
-export function createOrderTools({ phone, name, bcv, notify }) {
+export function createOrderTools({ phone, name, bcv, notify, customerText = '' }) {
   const state = {
     cartChanged: false, catalogAdded: false, boleta: null, addressSaved: false,
     missingHouseNumber: false, weighed: [], consulted: [], waitingWeight: false,
@@ -320,6 +347,11 @@ export function createOrderTools({ phone, name, bcv, notify }) {
       if (!found.product) return { error: `"${producto}" no está en el catálogo.` };
 
       const p = found.product;
+      // "un aguacate", "3 plátanos": la IA a veces lo toma como kilos; si el cliente no habló de peso, se manda a pesar.
+      if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
+        const result = handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
+        return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos): se envió a pesar en caja en lugar de agregarlo por kilo.` };
+      }
       const order = db.getOrCreateActiveOrder(phone);
       const existing = order.items.find((i) => i.nombre === p.nombre && i.presentacion === p.presentacion);
       if (existing) existing.cantidad = round2(existing.cantidad + qty);
@@ -362,7 +394,7 @@ export function createOrderTools({ phone, name, bcv, notify }) {
       order.status = 'abierto';
       db.saveOrder(order);
       state.cartChanged = true;
-      state.consulted.push(nombre);
+      state.consulted.push({ nombre, tipo: tipo === 'farmacia' ? 'farmacia' : 'ferreteria' });
       return {
         ok: true,
         consultado_al_encargado: detalle,
