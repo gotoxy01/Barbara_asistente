@@ -39,7 +39,77 @@ const SYNONYMS = {
   detergente: ['detergente', 'jabon'],
   embutido: ['jamon', 'mortadela', 'salchicha', 'chorizo', 'pepperoni'],
   charcuteria: ['jamon', 'queso', 'mortadela', 'salchicha', 'chorizo', 'tocineta'],
+
+  // Formas de hablar venezolanas: el cliente pide "una polarcita", "unas frías", "la bombona"...
+  cerveza: ['cerveza', 'pilsen', 'polar', 'zulia', 'solera', 'regional', 'light'],
+  polarcita: ['cerveza', 'pilsen', 'polar'],
+  polarsita: ['cerveza', 'pilsen', 'polar'],
+  polarita: ['cerveza', 'pilsen', 'polar'],
+  fria: ['cerveza', 'pilsen', 'polar'],
+  birra: ['cerveza', 'pilsen', 'polar'],
+  pilsen: ['cerveza', 'pilsen', 'polar'],
+  pilsensita: ['cerveza', 'pilsen', 'polar'],
+  tercio: ['cerveza', 'pilsen', 'polar'],
+  maltica: ['malta', 'maltin'],
+  maltin: ['malta', 'maltin'],
+  colita: ['colita', 'kolita', 'frescolita'],
+  refresco: ['refresco', 'pepsi', 'coca', 'glup', 'fanta', 'frescolita', 'chinotto', 'gaseosa', '7up'],
+  bombona: ['bombona', 'gas'],
+  fosforo: ['fosforo', 'cerillo', 'yesquero', 'encendedor'],
+  yesquero: ['yesquero', 'encendedor', 'fosforo'],
+  encendedor: ['yesquero', 'encendedor'],
+  dental: ['dental', 'dentifrica', 'colgate', 'pepsodent', 'kolynos', 'fortident'],
+  dentifrico: ['dental', 'dentifrica', 'colgate'],
+  colgate: ['dental', 'colgate'],
+  toilet: ['higienico', 'toilet'],
+  tuale: ['higienico', 'toilet'],
+  hojilla: ['hojilla', 'afeitadora', 'prestobarba', 'gillette'],
+  afeitadora: ['hojilla', 'afeitadora', 'prestobarba', 'gillette'],
+  pila: ['pila', 'bateria', 'energizer', 'duracell'],
+  bateria: ['pila', 'bateria'],
+  diablito: ['diablito', 'underwood', 'endiablado'],
+  mantequilla: ['mantequilla', 'margarina', 'mavesa', 'nelly'],
+  margarina: ['mantequilla', 'margarina'],
+  ketchup: ['ketchup', 'tomate'],
+  banana: ['cambur', 'banana'],
+  sandia: ['patilla', 'sandia'],
+  papaya: ['lechosa', 'papaya'],
+  maracuya: ['parchita', 'maracuya'],
+  calabaza: ['auyama', 'calabaza'],
+  frijol: ['caraota', 'frijol'],
+  pimiento: ['pimenton', 'pimiento'],
+  palomita: ['cotufa', 'palomita'],
+  ponque: ['ponque', 'torta', 'bizcocho'],
+  chupeta: ['chupeta', 'chupetin', 'colombina'],
+  molde: ['molde', 'sandwich', 'cuadrado'],
+  lavaplato: ['lavaplato', 'lavavajilla'],
+  cigarro: ['cigarro', 'cigarrillo'],
+  cigarrillo: ['cigarro', 'cigarrillo'],
 };
+
+/** Sinónimos de la palabra en singular o plural ("frías", "pilas", "fósforos"). */
+function synonymsOf(word) {
+  return SYNONYMS[word] ?? SYNONYMS[word.replace(/e?s$/, '')] ?? SYNONYMS[word.replace(/s$/, '')] ?? null;
+}
+
+/**
+ * Diminutivos ("polarcita", "quesito", "cafecito", "panecito", "refresquito", "cervecita") -> palabra base.
+ * Solo se usan si la palabra tal cual no existe en el catálogo, para no meter ruido.
+ */
+function diminutiveBases(word) {
+  const bases = new Set();
+  let m;
+  if ((m = word.match(/^(.{3,})ecit[oa]s?$/))) bases.add(m[1]);
+  if ((m = word.match(/^(.{3,})cit[oa]s?$/))) bases.add(m[1]);
+  if ((m = word.match(/^(.{2,})quit([oa])s?$/))) bases.add(`${m[1]}c${m[2]}`);
+  if ((m = word.match(/^(.{2,})guit([oa])s?$/))) bases.add(`${m[1]}g${m[2]}`);
+  if ((m = word.match(/^(.{3,})(?:it|ic|ill)([oa])s?$/))) {
+    bases.add(`${m[1]}${m[2]}`);
+    if (m[1].endsWith('c')) bases.add(`${m[1].slice(0, -1)}z${m[2]}`);
+  }
+  bases.delete(word);
+  return [...bases].filter((b) => b.length >= 3);
+}
 
 function normalize(text) {
   return String(text ?? '')
@@ -66,8 +136,30 @@ function tokenize(text) {
     .map(stem);
 }
 
-function levenshtein(a, b) {
-  if (Math.abs(a.length - b.length) > 1) return 2;
+/** "Ruffles" y "rufles", "Mavesa" y "mabesa", "Cheese" y "chees" se escriben distinto pero suenan igual. */
+function phonetic(token) {
+  return token
+    .replace(/ll/g, 'i')
+    .replace(/h/g, '')
+    .replace(/qu/g, 'k')
+    .replace(/c([ei])/g, 's$1')
+    .replace(/[cq]/g, 'k')
+    .replace(/z/g, 's')
+    .replace(/v/g, 'b')
+    .replace(/y/g, 'i')
+    .replace(/w/g, 'u')
+    .replace(/(.)\1+/g, '$1');
+}
+
+/** Palabras del nombre + las palabras vecinas unidas, para que "cocacola" encuentre "Coca Cola". */
+function nameTokens(text) {
+  const words = normalize(text).split(/[\s.,/]+/).filter((w) => w.length >= 2);
+  const joined = words.slice(1).map((w, i) => words[i] + w).filter((w) => /^[a-zñ]+$/.test(w));
+  return [...new Set([...words, ...joined].map(stem))];
+}
+
+function levenshtein(a, b, max = 1) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
   const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
     let diag = prev[0];
@@ -85,8 +177,15 @@ function strictMatch(queryToken, productToken) {
   return queryToken === productToken || (queryToken.length >= 4 && productToken.startsWith(queryToken));
 }
 
+/** Tolerancia a errores de tipeo: igual por sonido; si no, 1 letra distinta (2 en palabras largas). Las palabras cortas solo por sonido. */
 function fuzzyMatch(queryToken, productToken) {
-  return queryToken.length >= 5 && productToken.length >= 5 && levenshtein(queryToken, productToken) <= 1;
+  if (queryToken.length < 4 || productToken.length < 4) return false;
+  const a = phonetic(queryToken);
+  const b = phonetic(productToken);
+  if (a === b || (a.length >= 5 && b.startsWith(a))) return true;
+  if (Math.min(a.length, b.length) < 5) return false;
+  const max = Math.min(a.length, b.length) >= 8 ? 2 : 1;
+  return levenshtein(a, b, max) <= max;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +221,7 @@ function buildProduct({ nombre, presentacion, precio, categoria, marca = '' }) {
     presentacion: presentacion || 'unidad',
     precio: Number(precio),
     categoria,
-    nameTokens: tokenize(`${nombre} ${marca}`),
+    nameTokens: nameTokens(`${nombre} ${marca}`),
     extraTokens: tokenize(`${categoria} ${presentacion}`),
   };
 }
@@ -239,10 +338,15 @@ function queryTerms(userQuery, products) {
       .split(/[\s.,/]+/)
       .filter((w) => w.length >= 2 && !STOPWORDS.has(w) && !/^\d+$/.test(w))
   )].map((word) => {
-    const variants = [...new Set((SYNONYMS[word] ?? [word]).map(stem).concat(stem(word)))];
+    const inCatalog = (vs) => products.some((p) => vs.some((v) => p.nameTokens.some((t) => strictMatch(v, t))));
+    let variants = [...new Set((synonymsOf(word) ?? [word]).map(stem).concat(stem(word)))];
+    if (!inCatalog(variants)) {
+      const fromDiminutive = diminutiveBases(word).flatMap((b) => synonymsOf(b) ?? [b]);
+      variants = [...new Set([...variants, ...fromDiminutive.map(stem)])];
+    }
     // La tolerancia a errores de tipeo solo se usa si la palabra no existe tal cual en el catálogo;
     // así "jamon" no trae "jabon", pero "arina" sí encuentra "harina".
-    const existsExactly = products.some((p) => variants.some((v) => p.nameTokens.some((t) => strictMatch(v, t))));
+    const existsExactly = inCatalog(variants);
     const matcher = existsExactly ? strictMatch : (v, t) => strictMatch(v, t) || fuzzyMatch(v, t);
     return { word, variants, matcher };
   });
@@ -252,8 +356,9 @@ function scoreProduct(product, terms) {
   let nameHits = 0;
   let extraHits = 0;
   for (const term of terms) {
-    const inName = term.variants.some((v) => product.nameTokens.some((t) => term.matcher(v, t)));
-    if (inName) { nameHits++; continue; }
+    // Coincidir con varias formas de la palabra ("polarcita": cerveza + pilsen + polar) ordena primero lo más parecido.
+    const matched = term.variants.filter((v) => product.nameTokens.some((t) => term.matcher(v, t))).length;
+    if (matched) { nameHits += 1 + Math.min(matched - 1, 3) * 0.1; continue; }
     if (term.variants.some((v) => product.extraTokens.some((t) => term.matcher(v, t)))) extraHits++;
   }
   // Coincidir solo en categoría/presentación no basta: debe coincidir algo del nombre o la marca.
@@ -290,7 +395,7 @@ function rankProducts(query, products) {
 }
 
 const nameHasTerm = (p, term) => term.variants.some((v) => p.nameTokens.some((t) => term.matcher(v, t)));
-const nameIsTerm = (p, term) => p.nameTokens.every((t) => term.variants.some((v) => term.matcher(v, t)));
+const nameIsTerm = (p, term) => p.nameTokens.every((t) => term.matcher(stem(term.word), t));
 
 /**
  * Si el cliente pregunta por un producto genérico ("plátano", "tomate") y existe un producto que se llama
@@ -323,7 +428,7 @@ function matchQuery(query, products) {
   }
 
   // Palabras que forman juntas un mismo producto ("harina pan") se resuelven con el ranking normal.
-  const combined = ranked.filter((r) => r.score >= 2).map((r) => r.p);
+  const combined = ranked.filter((r) => terms.filter((t) => nameHasTerm(r.p, t)).length >= 2).map((r) => r.p);
   const loose = perTerm.filter(({ term }) => !combined.some((p) => nameHasTerm(p, term)));
   const perTermLimit = Math.max(2, Math.floor(max / terms.length));
   const matches = loose.length
@@ -385,7 +490,8 @@ export function searchProducts(queries, { bcv = null } = {}) {
     if (missingWords.length) {
       lines.push(
         `SIN COINCIDENCIAS EN EL CATÁLOGO: ${missingWords.map((w) => `"${w}"`).join(', ')}. ` +
-        'Si alguna de estas palabras es un producto que el cliente pidió, NO lo tenemos disponible por ahora.',
+        'Si alguna de estas palabras es un producto que el cliente pidió, NO lo tenemos disponible por ahora, ' +
+        'salvo que uno de los PRODUCTOS ENCONTRADOS sea claramente lo que quiso decir escrito de otra forma (ofrécele ese).',
       );
     }
     lines.push(BCV_NOTE);
