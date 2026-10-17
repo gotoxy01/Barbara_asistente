@@ -41,6 +41,8 @@ export const config = {
   // Si es false, un error técnico de Gemini NO pausa el chat (el cliente puede reintentar)
   pauseOnError: /^(1|true|si|sí)$/i.test(process.env.PAUSE_ON_ERROR || 'false'),
   historyLimit: Number(process.env.HISTORY_LIMIT || 20),
+  // Un pedido sin actividad (y el historial que ve la IA) dejan de contar después de estas horas.
+  orderMemoryHours: Number(process.env.ORDER_MEMORY_HOURS || 24),
   timezone: process.env.TIMEZONE || 'America/Caracas',
   dbPath: process.env.DB_PATH || 'barbara.db',
   delivery: {

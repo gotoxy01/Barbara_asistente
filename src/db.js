@@ -62,13 +62,17 @@ const stmts = {
   lastModelAt: db.prepare(`SELECT MAX(created_at) AS t FROM messages WHERE phone = ? AND role = 'model'`),
   history: db.prepare(`
     SELECT role, content FROM (
-      SELECT id, role, content FROM messages WHERE phone = ? ORDER BY id DESC LIMIT ?
+      SELECT id, role, content FROM messages WHERE phone = ? AND created_at >= ? ORDER BY id DESC LIMIT ?
     ) ORDER BY id ASC
+  `),
+  expireOrders: db.prepare(`
+    UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ?
+    WHERE status IN ('abierto', 'boleta') AND updated_at < ?
   `),
   markProcessed: db.prepare('INSERT OR IGNORE INTO processed_events (wa_message_id, created_at) VALUES (?, ?)'),
   activeOrder: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta') ORDER BY id DESC LIMIT 1`),
   activeOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta') ORDER BY id DESC`),
-  pendingOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta', 'recibido') AND items != '[]' ORDER BY id`),
+  pendingOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta', 'recibido') AND items != '[]' AND updated_at >= ? ORDER BY id`),
   pendingOrdersOf: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta', 'recibido') ORDER BY id`),
   cancelOrder: db.prepare(`UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ? WHERE id = ?`),
   createOrder: db.prepare('INSERT INTO orders (phone, created_at, updated_at) VALUES (?, ?, ?)'),
@@ -102,8 +106,20 @@ export function addMessage(phone, role, content) {
   stmts.addMessage.run(phone, role, content, Date.now());
 }
 
+function memoryCutoff() {
+  return Date.now() - config.orderMemoryHours * 3600 * 1000;
+}
+
+/** Cancela los pedidos a medio armar o con boleta enviada que llevan más de ORDER_MEMORY_HOURS sin actividad. */
+export function expireStaleOrders() {
+  const cutoff = memoryCutoff();
+  const { changes } = stmts.expireOrders.run(Date.now(), cutoff);
+  if (changes) console.log(`Pedidos sin actividad por más de ${config.orderMemoryHours} h cancelados: ${changes}. Ya no entran en ninguna boleta.`);
+  return cutoff;
+}
+
 export function getHistory(phone, limit = config.historyLimit) {
-  return stmts.history.all(phone, limit);
+  return stmts.history.all(phone, memoryCutoff(), limit);
 }
 
 /** Momento (ms) de la última respuesta enviada al cliente, o null si nunca se le respondió. */
@@ -115,19 +131,22 @@ function parseOrder(row) {
   return row ? { ...row, items: JSON.parse(row.items) } : null;
 }
 
-/** Pedido en curso del cliente (abierto o con boleta enviada), o null. */
+/** Pedido en curso del cliente (abierto o con boleta enviada, con actividad en las últimas ORDER_MEMORY_HOURS), o null. */
 export function getActiveOrder(phone) {
+  expireStaleOrders();
   return parseOrder(stmts.activeOrder.get(phone));
 }
 
 /** Pedidos en curso con productos que el encargado aún no ha pesado. */
 export function getOrdersAwaitingWeight() {
+  expireStaleOrders();
   return stmts.activeOrders.all().map(parseOrder).filter((o) => o.items.some((i) => i.precio == null));
 }
 
 /** Pedidos sin cerrar de todos los clientes (armando, con boleta o registrados esperando despacho). */
 export function getPendingOrders() {
-  return stmts.pendingOrders.all().map(parseOrder);
+  const cutoff = expireStaleOrders();
+  return stmts.pendingOrders.all(cutoff).map(parseOrder);
 }
 
 /** Cancela los pedidos sin cerrar del cliente y devuelve los que se cancelaron. */

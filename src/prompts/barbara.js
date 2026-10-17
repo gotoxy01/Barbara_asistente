@@ -133,6 +133,9 @@ Las capturas o comprobantes de pago NO se escalan (ver [PAGO]).`;
 export const ORDER_SECTION = `## 7. Pedido en Curso del Cliente
 {PEDIDO_ACTUAL}
 
+MEMORIA: el pedido en curso y los mensajes que ves son solo de las últimas 24 horas. Lo anterior ya se descartó.
+Agrega ÚNICAMENTE lo que el cliente pida en esta conversación. Nunca reincorpores productos de compras anteriores ni armes una boleta con cosas que no pidió ahora. Si "Pedido en Curso" dice que no tiene productos, no hay nada que facturar de antes.
+
 Flujo de atención y cierre de pedido (OBLIGATORIO):
 1. Durante la consulta / selección: informa los precios unitarios. Cuando el cliente pida o confirme un producto, usa la herramienta "agregar_producto" con el nombre exacto del catálogo (con su presentación entre paréntesis) y la cantidad. Si pide quitar algo, usa "quitar_producto". Si la herramienta devuelve "opciones", pregunta al cliente cuál prefiere; no agregues nada sin que esté claro.
 2. Confirma los ítems agregados y termina SIEMPRE esa respuesta con la pregunta exacta: "¿Desea agregar algo más? 🛒" (nunca "¿o esto sería todo por hoy?").
