@@ -30,6 +30,19 @@ const FALLBACK_REPLY =
 const RETRY_LATER_REPLY =
   'Disculpe, en este momento presentamos un inconveniente técnico y no pude procesar su mensaje. 🙏\n\nPor favor, intente nuevamente en unos minutos. *Abasto Los Cuchos* agradece su paciencia.';
 
+const FAILURE_REPLY_RE = /inconveniente técnico/i;
+const SILENT_MARK = '[sin respuesta]';
+const RESUME_NOTE = 'Disculpe la demora. Ya retomo su solicitud.';
+const phoneTail = new Map();
+
+/** Una sola respuesta a la vez por cliente, también cuando el retome coincide con un mensaje nuevo. */
+function lockPhone(phone, task) {
+  const prev = phoneTail.get(phone) ?? Promise.resolve();
+  const run = prev.then(task, task);
+  phoneTail.set(phone, run.then(() => {}, () => {}));
+  return run;
+}
+
 const TECH_ALERT_INTERVAL_MS = 30 * 60 * 1000;
 let lastTechAlertAt = 0;
 
@@ -149,7 +162,11 @@ function escalationNotice({ name, phone, text }) {
  * @returns {Promise<{ reply: string|null, escalated: boolean, paused: boolean, productContext?: string, error?: Error }>}
  *   reply = null cuando el chat está en manos de un asesor y el bot no debe responder.
  */
-export async function handleCustomerMessage({ phone, name, text }, { notify = notifyAdvisor } = {}) {
+export function handleCustomerMessage(message, options) {
+  return lockPhone(message.phone, () => handleCustomerMessageNow(message, options));
+}
+
+async function handleCustomerMessageNow({ phone, name, text }, { notify = notifyAdvisor } = {}) {
   let chat = db.upsertChat(phone, name);
   if (isPauseExpired(chat)) {
     db.resumeChat(phone);
@@ -176,6 +193,14 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
   }
 
   const history = db.getHistory(phone);
+  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
+  return finishReply({ phone, displayName, text, notify, outcome });
+}
+
+/**
+ * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
+ */
+async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
   const bcv = await getBcvRate();
   const products = buildProductContext(history, bcv);
   const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
@@ -193,7 +218,8 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
     const result = await generateBarbaraReply(systemPrompt, history, tools);
     if (result.ignore && !tools.state.cartChanged && !isGreeting(text)) {
       console.log(`[${phone}] Mensaje ajeno a la bodega (proveedor, cobro, spam...): Bárbara no responde.`);
-      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model };
+      if (resume) db.addMessage(phone, 'model', SILENT_MARK);
+      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
     }
     if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, pendingCustomerText(history), tools);
     reply = result.ignore && !tools.state.cartChanged
@@ -204,14 +230,25 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
     toolCalls = result.toolCalls;
     model = result.model;
   } catch (error) {
-    if (!isGreeting(text)) return handleAiFailure({ phone, name: displayName, text, error, notify, productContext });
+    if (!isGreeting(text)) {
+      const failed = await handleAiFailure({ phone, name: displayName, text, error, notify, productContext, resume });
+      return { ...failed, tools };
+    }
     console.error(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
     reply = greetingReply(text, isNewConversation);
   }
 
-  db.addMessage(phone, 'model', reply);
+  if (resume && reply && !FAILURE_REPLY_RE.test(reply) && !/demora/i.test(reply)) {
+    reply = `${RESUME_NOTE}\n\n${reply}`;
+  }
+  return { reply, escalated, paused: false, productContext, toolCalls, model, tools };
+}
 
-  if (tools.state.weighed.length || tools.state.consulted.length) {
+async function finishReply({ phone, displayName, text, notify, outcome }) {
+  const { reply, escalated, tools } = outcome;
+  if (reply) db.addMessage(phone, 'model', reply);
+
+  if (tools?.state.weighed.length || tools?.state.consulted.length) {
     const order = db.getActiveOrder(phone);
     const items = order ? pendingWeighItems(order.items) : [];
     if (items.length) await notify(renderWeighAlert({ phone, name: displayName, items }));
@@ -222,7 +259,7 @@ export async function handleCustomerMessage({ phone, name, text }, { notify = no
     await notify(escalationNotice({ name: displayName, phone, text }));
   }
 
-  return { reply, escalated, paused: escalated, productContext, toolCalls, model };
+  return { reply, escalated, paused: outcome.paused || escalated, productContext: outcome.productContext, toolCalls: outcome.toolCalls, model: outcome.model };
 }
 
 /**
@@ -291,14 +328,14 @@ function applyOrderFlow(text, state) {
  * Por defecto NO pausa el chat: el cliente recibe un aviso para reintentar y el asesor
  * recibe como máximo una alerta técnica cada 30 minutos.
  */
-async function handleAiFailure({ phone, name, text, error, notify, productContext }) {
+async function handleAiFailure({ phone, name, text, error, notify, productContext, resume = false }) {
   console.error(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}): ${error.hint ?? error.message}`);
+  if (!resume && error.retryable) setTimeout(() => resumeOne(phone).catch((err) => console.error(`[${phone}]`, err.message)), 45_000);
 
   if (config.pauseOnError) {
-    db.addMessage(phone, 'model', FALLBACK_REPLY);
     db.pauseChat(phone);
     await notify(`${escalationNotice({ name, phone, text })}\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`);
-    return { reply: FALLBACK_REPLY, escalated: true, paused: true, productContext, error };
+    return { reply: FALLBACK_REPLY, escalated: false, paused: true, productContext, error };
   }
 
   if (Date.now() - lastTechAlertAt > TECH_ALERT_INTERVAL_MS) {
@@ -309,7 +346,71 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
       `Los chats NO se pausaron; los clientes reciben un aviso para reintentar.`
     );
   }
+  if (resume && FAILURE_REPLY_RE.test(db.getLatestMessage(phone)?.content ?? '')) {
+    return { reply: null, escalated: false, paused: false, productContext, error };
+  }
   return { reply: RETRY_LATER_REPLY, escalated: false, paused: false, productContext, error };
+}
+
+const catchupMs = () => config.catchupHours * 3600 * 1000;
+let resumeRunning = false;
+let resumeTimer = null;
+
+function needsResume(message) {
+  if (!message || message.content === SILENT_MARK) return false;
+  return message.role === 'user' || FAILURE_REPLY_RE.test(message.content);
+}
+
+/** Vuelve a generar la respuesta de un chat que se quedó en el aviso de falla o sin contestar. No reenvía el aviso. */
+function resumeOne(phone) {
+  return lockPhone(phone, () => resumeOneNow(phone));
+}
+
+async function resumeOneNow(phone) {
+  const latest = db.getLatestMessage(phone);
+  if (!needsResume(latest) || Date.now() - latest.created_at > catchupMs()) return;
+
+  let chat = db.getChat(phone);
+  if (chat?.paused) {
+    if (!isPauseExpired(chat)) return;
+    db.resumeChat(phone);
+    chat = db.getChat(phone);
+  }
+
+  const history = db.getHistory(phone).filter((m) => !FAILURE_REPLY_RE.test(m.content));
+  const text = pendingCustomerText(history);
+  if (!text.trim()) return;
+  const lastReplyAt = db.getLastModelMessageAt(phone);
+  const isNewConversation = !lastReplyAt || Date.now() - lastReplyAt > config.newConversationHours * 3600 * 1000;
+  const outcome = await produceReply({
+    phone, displayName: chat?.name, text, history, isNewConversation, notify: notifyAdvisor, resume: true,
+  });
+  const sent = await finishReply({ phone, displayName: chat?.name, text, notify: notifyAdvisor, outcome });
+  if (!sent.reply) return;
+  await sendMessage(phone, sent.reply);
+  console.log(`[${phone}] Conversación retomada${sent.model ? ` (${sent.model})` : ''}.`);
+}
+
+/** Responde lo pendiente de la última hora: avisos de inconveniente y mensajes que llegaron con Bárbara apagada. */
+export async function resumePendingConversations() {
+  if (resumeRunning) return;
+  resumeRunning = true;
+  try {
+    const pending = db.listLatestMessagesSince(Date.now() - catchupMs()).filter(needsResume);
+    if (pending.length) console.log(`Retomando ${pending.length} conversación(es) pendiente(s) de la última hora.`);
+    for (const row of pending) await resumeOne(row.phone);
+  } finally {
+    resumeRunning = false;
+  }
+}
+
+/** Al conectar, y cada 3 minutos, retoma lo que quedó sin respuesta real. */
+export function startResumeLoop() {
+  if (resumeTimer) return;
+  setTimeout(() => resumePendingConversations().catch((err) => console.error('No se pudieron retomar las conversaciones:', err.message)), 15_000);
+  resumeTimer = setInterval(() => {
+    resumePendingConversations().catch((err) => console.error('No se pudieron retomar las conversaciones:', err.message));
+  }, 3 * 60 * 1000);
 }
 
 /** Registra en el historial un mensaje que un asesor envió manualmente al cliente. */

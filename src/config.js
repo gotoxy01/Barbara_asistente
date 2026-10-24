@@ -30,10 +30,14 @@ export const config = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
     model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
-    // Reintentos solo para fallas pasajeras (429 por ráfaga, 5xx, respuesta vacía)
-    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 2),
-    // Modelo que se usa de inmediato si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-3.1-flash-lite',
+    // Reintentos solo para fallas pasajeras (429 por ráfaga, 5xx, tiempo agotado).
+    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 4),
+    // Tope de espera reintentando un mismo mensaje.
+    retryBudgetMs: Number(process.env.GEMINI_RETRY_BUDGET_MS || 45000),
+    // Cuántos clientes puede atender Gemini a la vez. Más de esto satura el modelo y Google responde 503.
+    concurrency: Number(process.env.GEMINI_CONCURRENCY || 2),
+    // Modelo que se usa si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-2.5-flash',
     timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 20000),
   },
   advisorPhone: (process.env.ADVISOR_PHONE || '').replace(/\D/g, ''),
@@ -60,6 +64,8 @@ export const config = {
   manualPauseMinutes: Number(process.env.MANUAL_PAUSE_MINUTES || 5),
   // Horas sin hablar con Bárbara para considerar que el cliente inicia una conversación nueva (y ella se presenta).
   newConversationHours: Number(process.env.NEW_CONVERSATION_HOURS || 6),
+  // Al arrancar, o cuando Gemini vuelve, responde lo que quedó pendiente en esta ventana.
+  catchupHours: Number(process.env.CATCHUP_HOURS || 1),
   bcv: {
     // Si se define (> 0), se usa esta tasa fija en lugar de consultarla en línea
     manualRate: Number(process.env.BCV_RATE || 0),

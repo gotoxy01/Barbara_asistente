@@ -105,28 +105,90 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MAX_TOOL_ROUNDS = 6;
 
+const STABLE_MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash'];
+const COOLDOWN_MS = 25_000;
+
+/** El principal, los flash estables y al final el respaldo si es un modelo lite (se saturan primero). */
+function modelRotation(current) {
+  const fallback = config.gemini.fallbackModel;
+  const lite = (name) => /lite/i.test(name ?? '');
+  const ordered = [current || config.gemini.model];
+  if (fallback && !lite(fallback)) ordered.push(fallback);
+  ordered.push(...STABLE_MODELS);
+  if (fallback && lite(fallback)) ordered.push(fallback);
+  return [...new Set(ordered.filter(Boolean))];
+}
+
+// Un modelo que acaba de responder 503/504 no se vuelve a llamar durante unos segundos.
+const cooldownUntil = new Map();
+const cooling = (model) => (cooldownUntil.get(model) ?? 0) > Date.now();
+const markDown = (model) => cooldownUntil.set(model, Date.now() + COOLDOWN_MS);
+const pickModel = (models) => models.find((model) => !cooling(model)) ?? null;
+
+// Como máximo N llamadas a la vez. La espera entre reintentos no ocupa un cupo, así otro cliente puede pasar.
+let geminiActive = 0;
+const geminiWaiters = [];
+
+function acquireGemini() {
+  if (geminiActive < Math.max(1, config.gemini.concurrency)) {
+    geminiActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => geminiWaiters.push(resolve));
+}
+
+function releaseGemini() {
+  const next = geminiWaiters.shift();
+  if (next) next();
+  else geminiActive -= 1;
+}
+
 /**
- * Ejecuta la llamada con reintentos. Si el modelo principal está saturado (503), demora demasiado
- * o limita por ráfaga, el siguiente intento usa de inmediato el modelo de respaldo en vez de esperar.
+ * Si el modelo está saturado, pasa al siguiente que no haya fallado hace un momento.
+ * Varios clientes a la vez no se quedan esperando 15 o 20 s detrás del mismo 503.
  * @param {(model: string) => Promise<any>} fn
- * @param {{ model: string }} turn  modelo activo del turno; queda en el de respaldo si hubo que cambiar
+ * @param {{ model: string }} turn  modelo activo del turno; queda en el que respondió
  */
 async function withRetries(fn, turn) {
-  const { fallbackModel } = config.gemini;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn(turn.model);
-    } catch (err) {
-      const error = classifyError(err);
-      if (!error.retryable || attempt >= config.gemini.maxRetries) throw error;
-      if (fallbackModel && turn.model !== fallbackModel) {
-        console.warn(`Gemini ${turn.model} falló (${error.kind}); usando el modelo de respaldo ${fallbackModel}`);
-        turn.model = fallbackModel;
-      } else {
-        await sleep(1000 * 2 ** attempt);
+  const models = modelRotation(turn.model);
+  const max = Math.max(config.gemini.maxRetries, models.length);
+  const budget = Math.min(Math.max(config.gemini.retryBudgetMs, 20_000), 60_000);
+  const started = Date.now();
+  let lastError;
+
+  for (let attempt = 0; attempt <= max; attempt++) {
+    let model = pickModel(models);
+    if (!model) {
+      const wait = Math.min(12_000, Math.min(...models.map((m) => cooldownUntil.get(m) ?? 0)) - Date.now());
+      if (wait > 0 && Date.now() + wait - started < budget) {
+        console.warn(`Gemini saturado en todos los modelos; el siguiente intento es en ${Math.ceil(wait / 1000)} s`);
+        await sleep(wait);
+        continue;
       }
+      break;
+    }
+
+    turn.model = model;
+    await acquireGemini();
+    try {
+      return await fn(model);
+    } catch (err) {
+      lastError = classifyError(err);
+      if (!lastError.retryable || Date.now() - started >= budget) throw lastError;
+      markDown(model);
+      const next = pickModel(models);
+      console.warn(
+        `Gemini ${model} falló (${lastError.kind}${lastError.status ? ` ${lastError.status}` : ''}); ` +
+        (next ? `sigue con ${next}` : 'todos los modelos están saturados'),
+      );
+    } finally {
+      releaseGemini();
     }
   }
+
+  throw lastError ?? new GeminiError('Gemini no respondió', {
+    kind: 'server', retryable: true, hint: 'Falla temporal de Google (modelo saturado).',
+  });
 }
 
 async function callGemini(model, systemPrompt, contents, tools) {

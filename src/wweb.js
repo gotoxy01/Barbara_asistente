@@ -11,7 +11,7 @@ import { enqueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
 import { getCatalogInfo } from './services/catalogService.js';
-import { handleCustomerMessage, notifyAdvisor, recordAdvisorMessage } from './services/chatService.js';
+import { handleCustomerMessage, notifyAdvisor, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
 
 const { Client, LocalAuth } = wweb;
@@ -251,6 +251,7 @@ client.on('message', async (msg) => {
     return;
   }
   if (msg.fromMe || msg.isStatus || !isCustomerChat(msg.from) || !['chat', 'ptt', 'audio', 'image', 'document', 'video', 'location', 'sticker', 'vcard', 'multi_vcard', 'buttons_response', 'list_response'].includes(msg.type)) return;
+  if (isOlderThanCatchup(msg)) return;
   const phone = await resolvePhone(msg.from);
   chatIdByPhone.set(phone, msg.from);
   enqueue(phone, () => processIncoming(msg, phone));
@@ -272,6 +273,8 @@ async function quotedBodyOf(msg) {
 /** Al conectar, WhatsApp reenvía mensajes viejos; esos no deben contar como respuestas manuales. */
 const STALE_MESSAGE_MS = 2 * 60 * 1000;
 const isStale = (msg) => msg.timestamp && Date.now() - msg.timestamp * 1000 > STALE_MESSAGE_MS;
+/** Lo que llegó con Bárbara apagada se responde si tiene como máximo esta antigüedad. */
+const isOlderThanCatchup = (msg) => msg.timestamp && Date.now() - msg.timestamp * 1000 > config.catchupHours * 3600 * 1000;
 
 client.on('message_create', async (msg) => {
   debugEvent('message_create', msg);
@@ -344,6 +347,7 @@ client.on('ready', async () => {
   console.log(config.advisorPhone
     ? `Avisos al asesor: +${config.advisorPhone}`
     : 'Avisos al asesor: chat "Mensajes para mí" de este mismo WhatsApp (configure ADVISOR_PHONE para usar otro número)');
+  startResumeLoop();
 });
 
 client.on('disconnected', (reason) => {

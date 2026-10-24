@@ -62,9 +62,17 @@ const stmts = {
   lastModelAt: db.prepare(`SELECT MAX(created_at) AS t FROM messages WHERE phone = ? AND role = 'model'`),
   history: db.prepare(`
     SELECT role, content FROM (
-      SELECT id, role, content FROM messages WHERE phone = ? AND created_at >= ? ORDER BY id DESC LIMIT ?
+      SELECT id, role, content FROM messages
+      WHERE phone = ? AND created_at >= ? AND content != '[sin respuesta]'
+      ORDER BY id DESC LIMIT ?
     ) ORDER BY id ASC
   `),
+  latestByPhone: db.prepare(`
+    SELECT m.phone, m.role, m.content, m.created_at
+    FROM messages m
+    JOIN (SELECT phone, MAX(id) AS id FROM messages WHERE created_at >= ? GROUP BY phone) t ON t.id = m.id
+  `),
+  latestMessage: db.prepare('SELECT role, content, created_at FROM messages WHERE phone = ? ORDER BY id DESC LIMIT 1'),
   expireOrders: db.prepare(`
     UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ?
     WHERE status IN ('abierto', 'boleta') AND updated_at < ?
@@ -120,6 +128,15 @@ export function expireStaleOrders() {
 
 export function getHistory(phone, limit = config.historyLimit) {
   return stmts.history.all(phone, memoryCutoff(), limit);
+}
+
+/** Último mensaje de cada chat dentro de la ventana (para retomar lo que quedó sin respuesta). */
+export function listLatestMessagesSince(sinceMs) {
+  return stmts.latestByPhone.all(sinceMs);
+}
+
+export function getLatestMessage(phone) {
+  return stmts.latestMessage.get(phone) ?? null;
 }
 
 /** Momento (ms) de la última respuesta enviada al cliente, o null si nunca se le respondió. */
