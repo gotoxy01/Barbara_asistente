@@ -1,5 +1,7 @@
 ﻿import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
+import { verbose } from '../log.js';
+import { AUDITOR_SYSTEM_PROMPT } from '../prompts/auditor.js';
 import {
   BARBARA_PROMPT,
   BUSINESS_INFO,
@@ -161,7 +163,7 @@ async function withRetries(fn, turn) {
     if (!model) {
       const wait = Math.min(12_000, Math.min(...models.map((m) => cooldownUntil.get(m) ?? 0)) - Date.now());
       if (wait > 0 && Date.now() + wait - started < budget) {
-        console.warn(`Gemini saturado en todos los modelos; el siguiente intento es en ${Math.ceil(wait / 1000)} s`);
+        verbose(`Gemini saturado; siguiente intento en ${Math.ceil(wait / 1000)} s`);
         await sleep(wait);
         continue;
       }
@@ -177,9 +179,9 @@ async function withRetries(fn, turn) {
       if (!lastError.retryable || Date.now() - started >= budget) throw lastError;
       markDown(model);
       const next = pickModel(models);
-      console.warn(
+      verbose(
         `Gemini ${model} falló (${lastError.kind}${lastError.status ? ` ${lastError.status}` : ''}); ` +
-        (next ? `sigue con ${next}` : 'todos los modelos están saturados'),
+        (next ? `sigue con ${next}` : 'todos los modelos saturados'),
       );
     } finally {
       releaseGemini();
@@ -288,4 +290,96 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
 
   throw new GeminiError('Demasiadas llamadas a herramientas en un solo turno', {
     kind: 'unknown', retryable: false, hint: 'La IA entró en un ciclo de herramientas.' });
+}
+
+function extractJsonObject(raw) {
+  const text = String(raw || '').trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const candidate = fenced || text;
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(candidate.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Segunda pasada: valida precios, cálculos y tono del borrador antes de enviarlo.
+ * Si el auditor falla o no responde JSON válido, se conserva el borrador original.
+ * @param {{ mensaje_cliente: string, datos_bd: string, borrador_barbara: string }} payload
+ * @returns {Promise<{ aprobado: boolean, motivo_fallo: string|null, mensaje_final: string, model?: string }>}
+ */
+export async function auditBarbaraReply(payload) {
+  const borrador = String(payload.borrador_barbara || '').trim();
+  if (!borrador) {
+    return { aprobado: true, motivo_fallo: null, mensaje_final: borrador };
+  }
+
+  const userPayload = JSON.stringify({
+    mensaje_cliente: String(payload.mensaje_cliente || ''),
+    datos_bd: String(payload.datos_bd || ''),
+    borrador_barbara: borrador,
+  });
+
+  const turn = { model: config.auditor.model || config.gemini.model };
+  const response = await withRetries((model) => getClient().models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [{ text: userPayload }] }],
+    config: {
+      systemInstruction: AUDITOR_SYSTEM_PROMPT,
+      temperature: 0,
+      responseMimeType: 'application/json',
+    },
+  }), turn);
+
+  const parsed = extractJsonObject(response.text);
+  const mensaje = String(parsed?.mensaje_final ?? '').trim();
+  if (!mensaje) {
+    throw new GeminiError('El auditor no devolvió mensaje_final', {
+      kind: 'empty', retryable: false, hint: 'Auditor sin mensaje_final usable.',
+    });
+  }
+
+  const aprobado = parsed?.aprobado === true;
+  return {
+    aprobado,
+    motivo_fallo: aprobado ? null : (parsed?.motivo_fallo ? String(parsed.motivo_fallo) : 'Rechazado por el auditor'),
+    mensaje_final: mensaje,
+    model: turn.model,
+  };
+}
+
+const OPERATOR_DRAFT_PROMPT =
+  'Eres Bárbara, vendedora de Abasto Los Cuchos en Venezuela. ' +
+  'Redacta UN mensaje corto de WhatsApp para el cliente, en español de usted, tono humano y cercano. ' +
+  'Usa solo datos_bd e instrucción_operador. No digas que eres IA ni bot. Solo el mensaje final, sin JSON.';
+
+/**
+ * Redacta el mensaje al cliente a partir de una instrucción del operador (edición / sin stock).
+ * @param {{ instruccion: string, ticket: object, datos_bd?: string }} args
+ */
+export async function draftFromOperatorInstruction({ instruccion, ticket, datos_bd = '' }) {
+  const payload = JSON.stringify({
+    cliente: ticket?.clienteNombre || ticket?.clienteTelefono,
+    borrador_previo: ticket?.borradorRespuesta || '',
+    items: ticket?.items || [],
+    instruccion_operador: instruccion,
+    datos_bd,
+  });
+  const turn = { model: config.gemini.model };
+  const response = await withRetries((model) => getClient().models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [{ text: payload }] }],
+    config: { systemInstruction: OPERATOR_DRAFT_PROMPT, temperature: 0.4 },
+  }), turn);
+  const text = (response.text || '').trim();
+  if (!text) {
+    throw new GeminiError('No se pudo redactar el mensaje del operador', {
+      kind: 'empty', retryable: false, hint: 'Gemini no devolvió texto para el ajuste del operador.',
+    });
+  }
+  return text.replace(/\*\*(.+?)\*\*/g, '*$1*');
 }

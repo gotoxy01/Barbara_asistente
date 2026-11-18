@@ -30,6 +30,33 @@ export function sendText(to, text) {
   });
 }
 
+/**
+ * Tarjeta con hasta 3 botones de respuesta rápida (WhatsApp Cloud API).
+ * Títulos máx. 20 caracteres; ids máx. 256.
+ * @param {string} to
+ * @param {{ bodyText: string, buttons: { id: string, title: string }[], footer?: string }} opts
+ */
+export function sendInteractiveButtons(to, { bodyText, buttons, footer }) {
+  const replyButtons = (buttons || []).slice(0, 3).map((b) => ({
+    type: 'reply',
+    reply: {
+      id: String(b.id).slice(0, 256),
+      title: String(b.title).slice(0, 20),
+    },
+  }));
+  return post('messages', {
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      body: { text: String(bodyText || '').slice(0, 1024) },
+      ...(footer ? { footer: { text: String(footer).slice(0, 60) } } : {}),
+      action: { buttons: replyButtons },
+    },
+  });
+}
+
 /** Marca el mensaje como leído y muestra "escribiendo..." al cliente (hasta 25 s o hasta que llegue la respuesta). */
 export function markAsRead(messageId) {
   return post('messages', { status: 'read', message_id: messageId, typing_indicator: { type: 'text' } });

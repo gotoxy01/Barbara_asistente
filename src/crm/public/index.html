@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Buzón · Los Cuchos</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="inbox">
+      <header class="inbox-head">
+        <div>
+          <h1>Buzón</h1>
+          <p class="sub">Abasto Los Cuchos</p>
+        </div>
+        <button type="button" id="btnOrders" class="chip" title="Pedidos de hoy">Pedidos</button>
+      </header>
+
+      <section class="attention" aria-label="Atención">
+        <div class="attention-head">
+          <strong>Atención</strong>
+          <span id="alertCount" class="count">0</span>
+        </div>
+        <div id="alertList" class="alert-list">
+          <p class="empty tiny">Sin pendientes de caja.</p>
+        </div>
+      </section>
+
+      <div id="chatList" class="inbox-list"></div>
+      <footer class="inbox-foot">
+        <span id="status">Cargando…</span>
+        <button type="button" id="btnRefresh" class="linkish">Actualizar</button>
+      </footer>
+    </aside>
+
+    <section class="pane">
+      <header id="threadHead" class="pane-head">
+        <div>
+          <strong id="threadName">Seleccione un chat</strong>
+          <div id="threadMeta" class="sub"></div>
+        </div>
+      </header>
+      <div id="messages" class="thread"></div>
+      <form id="replyForm" class="composer" hidden>
+        <textarea id="replyText" rows="2" placeholder="Responder al cliente…" required></textarea>
+        <button type="submit" class="send">Enviar</button>
+      </form>
+    </section>
+  </div>
+
+  <dialog id="ordersDialog">
+    <form method="dialog" class="dialog-bar">
+      <strong>Pedidos de hoy</strong>
+      <button value="close" class="linkish">Cerrar</button>
+    </form>
+    <div id="orderList" class="orders"></div>
+  </dialog>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

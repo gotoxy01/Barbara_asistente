@@ -1,24 +1,29 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
+import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, sendMessage } from '../messenger.js';
-import { buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
+import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { getBcvRate } from './bcvService.js';
 import { searchProducts } from './catalogService.js';
+import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
   BOLETA_MARKER,
   createOrderTools,
   HOUSE_NUMBER_REMINDER,
+  isSoldByWeight,
+  moneyAmountMentioned,
   MORE_ITEMS_QUESTION,
+  mentionsWeight,
   pendingWeighItems,
   renderDeliveryFees,
   renderOrderContext,
-  renderWeighAlert,
   renderWeighWaitMessage,
+  weightMentionedFor,
 } from './orderService.js';
 
 const WAITING_WEIGHT_REPLY =
-  'En cuanto el encargado en caja me confirme el precio, le envío la boleta completa con el total. ¡Un momento por favor! ⏳';
+  '¡Claro! Déjeme pesarlo aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️';
 
 const ATTACHMENT_RE = /^\[El cliente adjuntó (una imagen|un documento)/;
 
@@ -50,17 +55,44 @@ const EMPTY_ESCALATION_REPLY =
   'Gracias por su mensaje. En breve uno de nuestros asesores de *Abasto Los Cuchos* le atenderá personalmente. 🙌';
 
 /**
- * Envía un mensaje de WhatsApp al asesor (ADVISOR_PHONE). Con whatsapp-web.js, si no hay ADVISOR_PHONE,
- * el aviso llega al chat "Mensajes para mí" del propio teléfono del negocio. Nunca lanza error.
+ * Avisos al equipo. Por defecto van al CRM (buzón). WhatsApp ("Mensajes para mí") solo si
+ * options.whatsapp === true — para no saturar el chat consigo mismo cuando hay muchas solicitudes.
+ *
+ * @param {string} text
+ * @param {{ kind?: string, phone?: string, title?: string, whatsapp?: boolean, skipCrm?: boolean }} [options]
  */
-export async function notifyAdvisor(text) {
+export async function notifyAdvisor(text, options = {}) {
+  const kind = options.kind || 'info';
+  const phone = options.phone || null;
+  const title = options.title || kindLabel(kind);
+  if (!options.skipCrm) {
+    try {
+      db.addAdvisorAlert({ kind, phone, title, body: text });
+    } catch (err) {
+      logError('No se pudo guardar la alerta del CRM:', err.message);
+    }
+  }
+
+  if (!options.whatsapp) return;
   const target = config.advisorPhone || getSelfPhone();
   if (!target) return;
   try {
     await sendMessage(target, text);
   } catch (err) {
-    console.error('No se pudo avisar al asesor:', err.message);
+    logError('No se pudo avisar por WhatsApp al asesor:', err.message);
   }
+}
+
+function kindLabel(kind) {
+  return ({
+    weigh: 'Atención en caja',
+    escalate: 'Chat escalado',
+    payment: 'Comprobante de pago',
+    paused: 'Chat pausado',
+    tech: 'Falla técnica',
+    order: 'Nuevo pedido',
+    info: 'Aviso',
+  })[kind] || 'Aviso';
 }
 
 function isPauseExpired(chat) {
@@ -81,23 +113,50 @@ function pendingCustomerText(history) {
     .join('\n');
 }
 
-const HAND_OFF_RE = /(consult|ped|pid|solicit|avis)\w*\s+(al|a un|con el)\s+encargado|una persona de nuestro equipo/i;
-const HARDWARE_RE = /ferreter|tornill|clavo|llave de paso|tubo|teflon|teflón|pintura|cable|bombillo|cerradura|candado|herramienta|martillo|destornillador|alicate|cemento|silicon|brocha|rodillo|lija|manguera|codo|niple|breaker|enchufe|tomacorriente|interruptor|bisagra|taladro|mecha|cinta aislante/i;
-const WEIGH_CLAIM_RE = /pes(e|ar|ado|aje)|balanza/i;
+const WEIGH_CLAIM_RE = /pes(e|ar|ado|aje)|balanza|momentico.*peso|pesarlo aqu[ií]/i;
+/** Pedido / cantidad (no solo “¿hay tomates?”). */
+const ORDER_INTENT_RE =
+  /(quiero|quer[ií]a|dame|d[eé]me|pasa(?:me)?|m[aá]nd(?:ame|e)|necesito|anot[ae]|agreg[aue]|pedi[rdó]?|pedir|unos?|unas?|trozo|pedazo|bandeja|pieza|\d)/i;
 
 /**
- * Gemini a veces le dice al cliente "ya le consulté al encargado" sin usar la herramienta, y el encargado
- * nunca se entera. Si eso pasa, el sistema anota lo que pidió el cliente y envía la alerta igual.
+ * Abre pesaje en balanza si el cliente pidió productos por kilo sin kilos ni monto fijo,
+ * aunque Gemini solo haya cotizado el precio y no haya llamado la herramienta.
  */
 async function ensureHandOff(aiText, customerText, tools) {
   const { state } = tools;
   if (state.weighed.length || state.consulted.length || state.waitingWeight || state.boleta) return;
-  if (!HAND_OFF_RE.test(aiText) || !customerText.trim()) return;
-  const producto = customerText.replace(/\s+/g, ' ').trim().slice(0, 120);
-  if (HARDWARE_RE.test(customerText)) await tools.execute('consultar_encargado', { producto, tipo: 'ferreteria' });
-  else if (WEIGH_CLAIM_RE.test(aiText)) await tools.execute('solicitar_pesaje', { producto, cantidad: '' });
-  else await tools.execute('consultar_encargado', { producto, tipo: 'farmacia' });
-  console.log(`Bárbara dijo que consultó al encargado sin usar la herramienta: se envió la alerta a caja igualmente.`);
+  const text = String(customerText || '').trim();
+  if (!text) return;
+
+  if (WEIGH_CLAIM_RE.test(aiText)) {
+    await tools.execute('solicitar_pesaje', { producto: text.slice(0, 120), cantidad: '' });
+    verbose('Bárbara habló de pesaje sin herramienta: se abrió solicitud de balanza.');
+    return;
+  }
+
+  // Cotización suelta ("¿hay tomates?", "precio del tomate") → no ticket.
+  if (moneyAmountMentioned(text)) return;
+  if (/^(hay|tienen|tiene|cuesta|precio|cu[aá]nto|me\s+cobra)\b/i.test(text)) return;
+
+  const found = searchProducts(text, {});
+  const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
+  if (!weighables.length) return;
+
+  // "tomates", "dame tomates", "2 tomates" → balanza. "1 kilo de tomate" → no.
+  const shortProductAsk = text.length <= 48;
+  if (!ORDER_INTENT_RE.test(text) && !shortProductAsk) return;
+  if (mentionsWeight(text) && !/\b(unidad|unidades|pieza|trozo|pedazo|bandeja|unos|unas)\b/i.test(text)) {
+    return;
+  }
+
+  const needsScale = weighables.filter((p) => !weightMentionedFor(p.nombre, text));
+  const targets = needsScale.length ? needsScale : weighables;
+  const primary = targets.find((p) => /^(tomate|pl[aá]tano|cebolla|aguacate|lim[oó]n|papa|yuca|piment[oó]n|ajo|cilantro|lechuga)$/i.test(p.nombre))
+    || targets[0];
+  const qtyMatch = text.match(/\b(\d+)\b/);
+  const cantidad = qtyMatch ? `${qtyMatch[1]} ${Number(qtyMatch[1]) === 1 ? 'unidad' : 'unidades'}` : 'al gusto / por pesar';
+  await tools.execute('solicitar_pesaje', { producto: primary.nombre, cantidad });
+  verbose(`Pedido de ${primary.nombre} sin peso fijo: se abrió ticket de balanza.`);
 }
 
 const GREETING_RE = /^(hola+|ola|buen[oa]s?|buen d[ií]a|saludos|hey|epa|qu[eé] tal|bendici[oó]n|good|hi)\b/i;
@@ -144,14 +203,9 @@ function buildProductContext(history, bcv) {
 
 function escalationNotice({ name, phone, text }) {
   return (
-    `🔔 *Chat escalado a humano*\n\n` +
-    `Cliente: *${name || 'Sin nombre'}*\n` +
-    `Teléfono: +${phone}\n` +
-    `Último mensaje: "${text}"\n\n` +
-    `El bot quedó *pausado* en este chat.\n` +
-    `• Responder desde aquí: #r ${phone} su mensaje\n` +
-    `• Reactivar a Bárbara: #reanudar ${phone}\n` +
-    `• Escribirle directo: https://wa.me/${phone}`
+    `Cliente: ${name || 'Sin nombre'} (+${phone})\n` +
+    `Último mensaje: "${text}"\n` +
+    'Bárbara quedó pausada. Responda desde el CRM o con #r.'
   );
 }
 
@@ -179,17 +233,19 @@ async function handleCustomerMessageNow({ phone, name, text }, { notify = notify
   const displayName = chat.name || name;
 
   if (chat.paused) {
-    await notify(`💬 *${displayName || '+' + phone}* (+${phone}) escribió en un chat pausado:\n"${text}"\n\nResponder: #r ${phone} su mensaje`);
+    await notify(
+      `${displayName || '+' + phone} (+${phone}) escribió con el chat pausado:\n"${text}"\n\nResponda desde el CRM.`,
+      { kind: 'paused', phone, title: 'Mensaje en chat pausado', whatsapp: false },
+    );
     return { reply: null, escalated: false, paused: true };
   }
 
   if (ATTACHMENT_RE.test(text)) {
     const order = db.getActiveOrder(phone);
-    await notify(
-      `🧾 *Posible comprobante de pago*\n${displayName || 'Cliente'} (+${phone}) envió: ${text}\n` +
-      `${order ? `Pedido #${order.id} (${order.status})${order.total_bs ? ` - Total: Bs. ${order.total_bs.toFixed(2)}` : ''}\n` : ''}` +
-      'Revise el chat para verificar el pago. Bárbara sigue atendiendo.',
-    );
+    const note = order
+      ? `Pedido #${order.id} (${order.status})${order.total_bs ? ` · Bs. ${order.total_bs.toFixed(2)}` : ''}`
+      : text.slice(0, 80);
+    await abrirTicketPago({ phone, name: displayName, note });
   }
 
   const history = db.getHistory(phone);
@@ -217,14 +273,14 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   try {
     const result = await generateBarbaraReply(systemPrompt, history, tools);
     if (result.ignore && !tools.state.cartChanged && !isGreeting(text)) {
-      console.log(`[${phone}] Mensaje ajeno a la bodega (proveedor, cobro, spam...): Bárbara no responde.`);
+      verbose(`[${phone}] Mensaje ajeno a la bodega: Bárbara no responde.`);
       if (resume) db.addMessage(phone, 'model', SILENT_MARK);
       return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
     }
     if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, pendingCustomerText(history), tools);
     reply = result.ignore && !tools.state.cartChanged
       ? greetingReply(text, isNewConversation)
-      : enforceBusinessName(applyOrderFlow(result.text, tools.state)) || EMPTY_ESCALATION_REPLY;
+      : enforceBusinessName(stripPrematurePaymentPitch(applyOrderFlow(result.text, tools.state), tools.state)) || EMPTY_ESCALATION_REPLY;
     if (isNewConversation && !/b[aá]rbara/i.test(reply)) reply = `${INTRO}\n\n${reply}`;
     escalated = result.escalate;
     toolCalls = result.toolCalls;
@@ -234,29 +290,110 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       const failed = await handleAiFailure({ phone, name: displayName, text, error, notify, productContext, resume });
       return { ...failed, tools };
     }
-    console.error(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
+    logError(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
     reply = greetingReply(text, isNewConversation);
   }
 
   if (resume && reply && !FAILURE_REPLY_RE.test(reply) && !/demora/i.test(reply)) {
     reply = `${RESUME_NOTE}\n\n${reply}`;
   }
+
+  if (reply && shouldAuditReply(reply, tools?.state)) {
+    const orderContext = renderOrderContext(phone, bcv);
+    const audited = await runAuditor({
+      phone,
+      mensaje_cliente: pendingCustomerText(history) || text,
+      datos_bd: `${productContext}\n\nPedido actual:\n${orderContext}`,
+      borrador_barbara: reply,
+      isNewConversation,
+      resume,
+    });
+    if (audited) reply = audited;
+  }
+
   return { reply, escalated, paused: false, productContext, toolCalls, model, tools };
 }
 
-async function finishReply({ phone, displayName, text, notify, outcome }) {
-  const { reply, escalated, tools } = outcome;
-  if (reply) db.addMessage(phone, 'model', reply);
+/** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
+function shouldAuditReply(reply, state = {}) {
+  if (!config.auditor.enabled) return false;
+  if (!reply || FAILURE_REPLY_RE.test(reply)) return false;
+  if (state.boleta || state.addressSaved) return false;
+  return true;
+}
 
-  if (tools?.state.weighed.length || tools?.state.consulted.length) {
-    const order = db.getActiveOrder(phone);
-    const items = order ? pendingWeighItems(order.items) : [];
-    if (items.length) await notify(renderWeighAlert({ phone, name: displayName, items }));
+/**
+ * Pasa el borrador por el auditor. Si Gemini falla o el JSON es inválido, se conserva el original.
+ * Tras una corrección se reaplican intro / nota de demora / nombre del negocio.
+ */
+async function runAuditor({ phone, mensaje_cliente, datos_bd, borrador_barbara, isNewConversation, resume }) {
+  const hadIntro = /b[aá]rbara/i.test(borrador_barbara);
+  const hadResume = /demora/i.test(borrador_barbara);
+  try {
+    const result = await auditBarbaraReply({ mensaje_cliente, datos_bd, borrador_barbara });
+    let final = enforceBusinessName(result.mensaje_final);
+    if (!final) return null;
+
+    if (result.aprobado) {
+      verbose(`[${phone}] Auditor: aprobado`);
+      return final;
+    }
+
+    verbose(`[${phone}] Auditor: corregido — ${result.motivo_fallo || 'sin detalle'}`);
+    if (isNewConversation && hadIntro && !/b[aá]rbara/i.test(final)) {
+      final = `${INTRO}\n\n${final}`;
+    }
+    if (resume && hadResume && !/demora/i.test(final)) {
+      final = `${RESUME_NOTE}\n\n${final}`;
+    }
+    return enforceBusinessName(final);
+  } catch (err) {
+    verbose(`[${phone}] Auditor omitido (${err.kind || 'error'}): ${err.message}`);
+    return null;
   }
+}
+
+async function finishReply({ phone, displayName, text, notify, outcome }) {
+  let { reply, escalated, tools } = outcome;
+  const order = db.getActiveOrder(phone);
+  const kind = physicalTicketKind({ reply, tools });
+
+  // Solo excepciones físicas → ficha telegráfica + botones 1-tap. El cliente ya recibió tono de mostrador.
+  if (!escalated && kind === 'pesaje') {
+    const pending = order ? pendingWeighItems(order.items) : [];
+    if (pending.length) {
+      await solicitarAprobacionRapida({
+        phone,
+        name: displayName,
+        borradorRespuesta: reply || '',
+        items: pending,
+        montoTotalUSD: order?.total_usd ?? null,
+        montoTotalBs: order?.total_bs ?? null,
+        motivo: 'pesaje',
+      });
+    }
+  } else if (!escalated && kind === 'flete') {
+    const { holdReply } = await solicitarAprobacionRapida({
+      phone,
+      name: displayName,
+      borradorRespuesta: reply || '',
+      items: [{ nombre: 'Flete', detalle: text?.slice(0, 80) || 'zona a confirmar' }],
+      motivo: 'flete',
+    });
+    if (holdReply && (!reply || !/env[ií]o|flete|delivery/i.test(reply))) reply = holdReply;
+  }
+
+  if (reply) db.addMessage(phone, 'model', reply);
 
   if (escalated) {
     db.pauseChat(phone);
-    await notify(escalationNotice({ name: displayName, phone, text }));
+    await notify(escalationNotice({ name: displayName, phone, text }), {
+      kind: 'escalate', phone, title: 'Chat escalado', whatsapp: false,
+    });
+    await notifyAdvisor(
+      `🚨 Escalado · +${phone}${displayName ? ` · ${displayName}` : ''}\nResponda en el CRM`,
+      { kind: 'escalate', phone, whatsapp: true, skipCrm: true },
+    );
   }
 
   return { reply, escalated, paused: outcome.paused || escalated, productContext: outcome.productContext, toolCalls: outcome.toolCalls, model: outcome.model };
@@ -272,6 +409,16 @@ function enforceBusinessName(text) {
     .replace(/Comercializadora\s+Los\s+Cuchos/gi, 'Abasto Los Cuchos')
     .replace(/Comercializadora/gi, 'Abasto')
     .replace(/\*\*(.+?)\*\*/g, '*$1*');
+}
+
+/** Quita el recordatorio de medios de pago si Gemini lo metió antes de cerrar el pedido. */
+function stripPrematurePaymentPitch(text, state = {}) {
+  if (state.boleta || state.addressSaved) return text;
+  return text
+    .replace(/\n*(?:aceptamos|recibimos|medios?\s+de\s+pago)[^\n]*(?:pago\s*m[oó]vil|transferencia|efectivo)[^\n]*/gi, '')
+    .replace(/\n*📲\s*\*?Datos para Pago M[oó]vil:?\*?(?:\n•[^\n]*)*/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /**
@@ -300,20 +447,16 @@ function applyOrderFlow(text, state) {
     return reply;
   }
 
-  // Mientras el encargado pesa o consulta, el cliente espera: no se le pregunta si desea algo más.
+  // Mientras se pesa en balanza, el cliente espera: tono de mostrador, sin "¿algo más?".
   if (state.weighed.length || state.consulted.length) {
     reply = reply.split(MORE_ITEMS_QUESTION).join('').trim();
-    const hardware = state.consulted.some((c) => c.tipo !== 'farmacia');
-    const pharmacy = state.consulted.some((c) => c.tipo === 'farmacia');
-    const explained = (!state.weighed.length || /balanza/i.test(reply))
-      && (!pharmacy || /encargado/i.test(reply))
-      && (!hardware || /persona/i.test(reply));
+    const explained = /momentico|pes(ar|e|arlo)|balanza|mostrador|verificar rapidito/i.test(reply);
     if (!explained) reply = `${reply}\n\n${renderWeighWaitMessage(state.weighed, state.catalogAdded, state.consulted)}`.trim();
     return reply;
   }
   if (state.waitingWeight) {
     reply = reply.split(MORE_ITEMS_QUESTION).join('').trim();
-    if (!/pes(ar|e|ando|aje)|encargado/i.test(reply)) reply = `${reply}\n\n${WAITING_WEIGHT_REPLY}`.trim();
+    if (!/momentico|pes(ar|e|arlo)|balanza/i.test(reply)) reply = `${reply}\n\n${WAITING_WEIGHT_REPLY}`.trim();
     return reply;
   }
 
@@ -329,21 +472,22 @@ function applyOrderFlow(text, state) {
  * recibe como máximo una alerta técnica cada 30 minutos.
  */
 async function handleAiFailure({ phone, name, text, error, notify, productContext, resume = false }) {
-  console.error(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}): ${error.hint ?? error.message}`);
-  if (!resume && error.retryable) setTimeout(() => resumeOne(phone).catch((err) => console.error(`[${phone}]`, err.message)), 45_000);
+  logError(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}): ${error.hint ?? error.message}`);
+  if (!resume && error.retryable) setTimeout(() => resumeOne(phone).catch((err) => logError(`[${phone}]`, err.message)), 45_000);
 
   if (config.pauseOnError) {
     db.pauseChat(phone);
-    await notify(`${escalationNotice({ name, phone, text })}\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`);
+    await notify(`${escalationNotice({ name, phone, text })}\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`, {
+      kind: 'tech', phone, title: 'Falla técnica', whatsapp: false,
+    });
     return { reply: FALLBACK_REPLY, escalated: false, paused: true, productContext, error };
   }
 
   if (Date.now() - lastTechAlertAt > TECH_ALERT_INTERVAL_MS) {
     lastTechAlertAt = Date.now();
     await notify(
-      `⚠️ *Bárbara no puede responder*\n\n${error.hint ?? error.message}\n\n` +
-      `Último cliente afectado: *${name || 'Sin nombre'}* (+${phone}): "${text}"\n` +
-      `Los chats NO se pausaron; los clientes reciben un aviso para reintentar.`
+      `${error.hint ?? error.message}\nÚltimo cliente: ${name || 'Sin nombre'} (+${phone}): "${text}"`,
+      { kind: 'tech', phone, title: 'Bárbara no pudo responder', whatsapp: false },
     );
   }
   if (resume && FAILURE_REPLY_RE.test(db.getLatestMessage(phone)?.content ?? '')) {
@@ -388,7 +532,7 @@ async function resumeOneNow(phone) {
   const sent = await finishReply({ phone, displayName: chat?.name, text, notify: notifyAdvisor, outcome });
   if (!sent.reply) return;
   await sendMessage(phone, sent.reply);
-  console.log(`[${phone}] Conversación retomada${sent.model ? ` (${sent.model})` : ''}.`);
+  info(`[${phone}] Conversación retomada${sent.model ? ` (${sent.model})` : ''}.`);
 }
 
 /** Responde lo pendiente de la última hora: avisos de inconveniente y mensajes que llegaron con Bárbara apagada. */
@@ -397,7 +541,7 @@ export async function resumePendingConversations() {
   resumeRunning = true;
   try {
     const pending = db.listLatestMessagesSince(Date.now() - catchupMs()).filter(needsResume);
-    if (pending.length) console.log(`Retomando ${pending.length} conversación(es) pendiente(s) de la última hora.`);
+    if (pending.length) info(`Retomando ${pending.length} conversación(es) pendiente(s) de la última hora.`);
     for (const row of pending) await resumeOne(row.phone);
   } finally {
     resumeRunning = false;
@@ -407,9 +551,9 @@ export async function resumePendingConversations() {
 /** Al conectar, y cada 3 minutos, retoma lo que quedó sin respuesta real. */
 export function startResumeLoop() {
   if (resumeTimer) return;
-  setTimeout(() => resumePendingConversations().catch((err) => console.error('No se pudieron retomar las conversaciones:', err.message)), 15_000);
+  setTimeout(() => resumePendingConversations().catch((err) => logError('No se pudieron retomar las conversaciones:', err.message)), 15_000);
   resumeTimer = setInterval(() => {
-    resumePendingConversations().catch((err) => console.error('No se pudieron retomar las conversaciones:', err.message));
+    resumePendingConversations().catch((err) => logError('No se pudieron retomar las conversaciones:', err.message));
   }, 3 * 60 * 1000);
 }
 

@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
+import { publishCrm } from './crm/events.js';
 
 const db = new DatabaseSync(config.dbPath);
 
@@ -51,6 +52,19 @@ addColumnIfMissing('chats', 'paused_until', 'INTEGER');
 // El cliente pidió la boleta mientras había productos por pesar: se envía en cuanto llegue el precio.
 addColumnIfMissing('orders', 'boleta_pendiente', 'INTEGER NOT NULL DEFAULT 0');
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS advisor_alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    phone       TEXT,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    done        INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_alerts_done ON advisor_alerts (done, id DESC);
+`);
+
 const stmts = {
   upsertChat: db.prepare(`
     INSERT INTO chats (phone, name, created_at) VALUES (?, ?, ?)
@@ -89,6 +103,39 @@ const stmts = {
     UPDATE orders SET status = ?, items = ?, address = ?, total_usd = ?, total_bs = ?, bcv_rate = ?, boleta_pendiente = ?, updated_at = ?
     WHERE id = ?
   `),
+  listChats: db.prepare(`
+    SELECT c.phone, c.name, c.paused, c.paused_until,
+           m.content AS last_content, m.role AS last_role, m.created_at AS last_at
+    FROM (
+      SELECT phone, MAX(id) AS id FROM messages
+      WHERE content != '[sin respuesta]' AND created_at >= ?
+      GROUP BY phone
+    ) t
+    JOIN messages m ON m.id = t.id
+    LEFT JOIN chats c ON c.phone = t.phone
+    ORDER BY m.created_at DESC
+    LIMIT ?
+  `),
+  chatMessages: db.prepare(`
+    SELECT id, role, content, created_at FROM messages
+    WHERE phone = ? AND content != '[sin respuesta]'
+    ORDER BY id DESC LIMIT ?
+  `),
+  ordersToday: db.prepare(`
+    SELECT * FROM orders
+    WHERE status IN ('abierto', 'boleta', 'recibido') AND items != '[]' AND updated_at >= ?
+    ORDER BY updated_at DESC
+  `),
+  insertAlert: db.prepare(`
+    INSERT INTO advisor_alerts (kind, phone, title, body, created_at, done) VALUES (?, ?, ?, ?, ?, 0)
+  `),
+  openAlerts: db.prepare(`
+    SELECT * FROM advisor_alerts WHERE done = 0 ORDER BY id DESC LIMIT ?
+  `),
+  markAlertDone: db.prepare(`UPDATE advisor_alerts SET done = 1 WHERE id = ?`),
+  markAlertsDoneByPhoneKind: db.prepare(`
+    UPDATE advisor_alerts SET done = 1 WHERE phone = ? AND kind = ? AND done = 0
+  `),
 };
 
 export function upsertChat(phone, name) {
@@ -111,7 +158,69 @@ export function resumeChat(phone) {
 }
 
 export function addMessage(phone, role, content) {
-  stmts.addMessage.run(phone, role, content, Date.now());
+  const createdAt = Date.now();
+  stmts.addMessage.run(phone, role, content, createdAt);
+  if (content !== '[sin respuesta]') {
+    publishCrm({ type: 'message', phone, role, content, createdAt });
+  }
+}
+
+/** Chats con actividad reciente (buzón CRM: últimos 7 días). */
+export function listRecentChats(limit = 80) {
+  const since = Date.now() - 7 * 24 * 3600 * 1000;
+  return stmts.listChats.all(since, limit).map((row) => ({
+    phone: row.phone,
+    name: row.name,
+    paused: row.paused === 1,
+    pausedUntil: row.paused_until,
+    lastContent: row.last_content,
+    lastRole: row.last_role,
+    lastAt: row.last_at,
+  }));
+}
+
+/** Historial del chat para el CRM (orden cronológico). */
+export function getChatMessages(phone, limit = 80) {
+  return stmts.chatMessages.all(phone, limit).reverse();
+}
+
+/** Pedidos tocados desde el inicio del día en Venezuela. */
+export function getOrdersToday() {
+  const start = startOfDayMs();
+  return stmts.ordersToday.all(start).map(parseOrder);
+}
+
+function startOfDayMs() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: config.timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  // Medianoche Caracas ≈ UTC-4.
+  return Date.parse(`${get('year')}-${get('month')}-${get('day')}T04:00:00.000Z`);
+}
+
+/** Guarda una alerta para el buzón CRM y avisa por SSE. */
+export function addAdvisorAlert({ kind, phone = null, title, body }) {
+  const createdAt = Date.now();
+  const { lastInsertRowid } = stmts.insertAlert.run(kind, phone, title, body, createdAt);
+  const alert = { id: Number(lastInsertRowid), kind, phone, title, body, created_at: createdAt, done: 0 };
+  publishCrm({ type: 'alert', alert });
+  return alert;
+}
+
+export function listOpenAlerts(limit = 40) {
+  return stmts.openAlerts.all(limit);
+}
+
+export function resolveAlert(id) {
+  stmts.markAlertDone.run(id);
+  publishCrm({ type: 'alert_done', id });
+}
+
+export function resolveAlertsByPhoneKind(phone, kind) {
+  stmts.markAlertsDoneByPhoneKind.run(phone, kind);
+  publishCrm({ type: 'alert_done', phone, kind });
 }
 
 function memoryCutoff() {

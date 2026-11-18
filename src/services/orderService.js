@@ -27,13 +27,21 @@ export function hasHouseNumber(address) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
-const isSoldByWeight = (p) => /kilo|\bkg\b/i.test(p.presentacion);
+export const isSoldByWeight = (p) => /kilo|\bkg\b/i.test(p?.presentacion || '');
 
 const plain = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 /** El cliente habló de peso ("1 kilo", "medio kilo", "500 gr", "1/2", "2kg")? Si no, pidió unidades. */
 export function mentionsWeight(text) {
   return /kilo|kg|\bk\b|gramo|\d\s*grs?\b|\bgrs?\b|\bmedio\b|\bcuarto\b|\d\s*\/\s*\d/i.test(text);
+}
+
+/** "dame $2 de queso" / "2 dolares de jamón" → monto USD pedido (sin ir a balanza). */
+export function moneyAmountMentioned(text) {
+  const t = String(text || '');
+  const usd = t.match(/(?:\$|usd|d[oó]lares?)\s*(\d+(?:[.,]\d{1,2})?)|(\d+(?:[.,]\d{1,2})?)\s*(?:\$|usd|d[oó]lares?)/i);
+  if (usd) return Number((usd[1] || usd[2]).replace(',', '.'));
+  return null;
 }
 
 /**
@@ -141,49 +149,65 @@ const joinNames = (names) => (names.length > 1 ? `${names.slice(0, -1).join(', '
  * @param {{ nombre: string, tipo: string }[]} [consulted] artículos de ferretería/farmacia consultados al encargado
  */
 export function renderWeighWaitMessage(weighedNames, hasCatalogItems, consulted = []) {
-  const hardware = consulted.filter((c) => c.tipo !== 'farmacia').map((c) => c.nombre);
-  const pharmacy = consulted.filter((c) => c.tipo === 'farmacia').map((c) => c.nombre);
-  const parts = [`¡Excelente!${hasCatalogItems ? ' Ya tengo anotados sus productos de catálogo.' : ''}`];
+  const parts = [];
+  if (hasCatalogItems) parts.push('¡Excelente! Ya tengo anotados sus productos de catálogo.');
   if (weighedNames.length) {
-    const plural = weighedNames.length > 1;
     parts.push(
-      `Como *${joinNames(weighedNames)}* se ${plural ? 'venden' : 'vende'} por peso exacto, le acabo de pedir al encargado en caja ` +
-      `que ${plural ? 'los' : 'lo'} pese en la balanza para darle el monto exacto. ⚖️`,
+      `¡Claro! Déjeme pesar *${joinNames(weighedNames)}* aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️`,
     );
   }
-  if (pharmacy.length) {
+  if (consulted.length) {
     parts.push(
-      `Ya le consulté al encargado en caja la disponibilidad y el precio de *${joinNames(pharmacy)}*; ` +
-      'en cuanto me confirme, le aviso por aquí. 🔎',
+      `Déjeme verificar rapidito *${joinNames(consulted.map((c) => c.nombre))}* en el mostrador y le confirmo.`,
     );
   }
-  if (hardware.length) {
-    parts.push(`Para su consulta de ferretería (*${joinNames(hardware)}*), en breve una persona de nuestro equipo le atenderá personalmente. 🔧`);
-  }
-  parts.push('¡Un momento por favor!');
+  if (!parts.length) parts.push('¡Claro! Déjeme revisarlo aquí en un momentico y ya le aviso.');
   return parts.join(' ');
 }
 
-/** Alerta para el personal de tienda ("Mensajes para mí"). Incluye TODO lo pendiente de ese cliente. */
-export function renderWeighAlert({ phone, name, items }) {
-  const onlyConsult = items.every((i) => i.consulta);
-  const anyConsult = items.some((i) => i.consulta);
+function precioKgLabel(item) {
+  const found = findProduct(String(item?.nombre || item?.detalle || ''));
+  const p = found.product;
+  if (p?.precio != null) return `$ ${Number(p.precio).toFixed(2)}/kg`;
+  return 'ver BD';
+}
+
+/**
+ * Ficha telegráfica de 3 líneas para la consola del encargado (pesaje).
+ * @param {{ ticketId?: string, name?: string|null, items: object[] }} opts
+ */
+export function renderWeighAlert({ ticketId, name, items }) {
+  const id = ticketId || '—';
+  const quien = name || 'Cliente';
+  const pide = (items || []).map((i) => i.detalle || i.nombre).join('; ') || 'producto';
+  const precios = [...new Set((items || []).map((i) => precioKgLabel(i)))].join(', ');
   return [
-    onlyConsult ? '⚠️ *ATENCIÓN EN CAJA - CONSULTAR DISPONIBILIDAD Y PRECIO*' : '⚠️ *ATENCIÓN EN CAJA - PESAR O COTIZAR*',
-    `• *Cliente:* +${phone}${name ? ` (${name})` : ''}`,
-    `• *Pidió:* ${items.map((i) => `${i.consulta ? '🔎' : '⚖️'} ${i.detalle}`).join('; ')}`,
-    '',
-    '👉 *¿Qué debes hacer?*',
-    onlyConsult
-      ? 'Verifica si lo tenemos y responde a este mensaje (deslízalo a la derecha) escribiendo el precio total en dólares así:'
-      : `Pesa ${anyConsult ? 'o verifica ' : ''}el producto y responde a este mensaje (deslízalo a la derecha) escribiendo el precio total en dólares así:`,
-    '#precio [monto]',
-    '',
-    `_(Ejemplo: Si ${items.length > 1 ? 'todo suma' : 'el producto cuesta'} $1.50 dólares, responde solo: #precio 1.50)_`,
-    ...(anyConsult ? ['', 'Si NO lo tenemos disponible, responde a este mensaje: #nohay'] : []),
-    ...(items.some((i) => i.consulta && i.presentacion !== 'farmacia')
-      ? ['', `🔧 *Ferretería:* Bárbara le dijo al cliente que una persona lo atenderá en breve. Puede escribirle directamente: https://wa.me/${phone}`]
-      : []),
+    `⚖️ *[PESAJE] — #${id} (${quien})*`,
+    `• *Pide:* ${pide} (Precio BD: ${precios})`,
+    '• *Falta:* Peso exacto en balanza (responde citando este mensaje con los gramos o kilos).',
+  ].join('\n');
+}
+
+/** Misma ficha para CRM (detalle). */
+export function renderWeighAlertDetail(opts) {
+  return renderWeighAlert(opts);
+}
+
+/** Ficha telegráfica de flete. */
+export function renderFreightAlert({ ticketId, name, zona }) {
+  return [
+    `🛵 *[FLETE] — #${ticketId || '—'} (${name || 'Cliente'})*`,
+    `• *Pide:* Envío a ${zona || 'zona indicada'}`,
+    '• *Falta:* Tarifa de delivery para esa zona (responde con el monto en USD).',
+  ].join('\n');
+}
+
+/** Ficha telegráfica de validación de pago. */
+export function renderPaymentAlert({ ticketId, name, phone, note }) {
+  return [
+    `🧾 *[PAGO] — #${ticketId || '—'} (${name || 'Cliente'})*`,
+    `• *Pide:* Validar comprobante (+${phone})`,
+    `• *Falta:* Revisar capture/transferencia${note ? ` — ${note}` : ''} y confirmar despacho.`,
   ].join('\n');
 }
 
@@ -256,7 +280,7 @@ export const ORDER_TOOL_DECLARATIONS = [
   },
   {
     name: 'solicitar_pesaje',
-    description: 'Anota un producto que se vende por PESO y no tiene precio fijo para lo que pidió el cliente: frutas, verduras, carnes, charcutería por trozo/pieza, o productos "por kilo" pedidos por unidades (ej. "5 plátanos", "unos limones", "un trozo de queso", "2 tomates"). El encargado en caja lo pesa y envía el precio. Llámala una vez por cada producto variable. NO la uses para productos de precio fijo ni cuando el cliente pide kilos exactos de un producto con precio por kilo en el catálogo.',
+    description: 'Solo para pesaje físico en balanza: el cliente pidió por unidad/pieza/trozo SIN kilos ni monto fijo (ej. "5 plátanos", "un pedazo de queso", "una bandeja de muslos"). NO la uses si pidió kilos/gramos exactos ni si pidió un monto en $ o Bs. (ej. "dame $2 de queso": calcula kilos y usa agregar_producto).',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -268,13 +292,13 @@ export const ORDER_TOOL_DECLARATIONS = [
   },
   {
     name: 'consultar_encargado',
-    description: 'Consulta al encargado en caja la disponibilidad y el precio de un artículo de FERRETERÍA (tornillos, clavos, herramientas, pintura, tubos, conexiones, cables, bombillos, cerraduras, materiales...) o de FARMACIA (medicamentos, pastillas, jarabes, analgésicos, antigripales, antibióticos, vitaminas, cremas medicinales...). Úsala SIEMPRE para esos artículos, aunque aparezcan en el catálogo, una vez por cada artículo. El encargado responde con el precio o indica que no hay.',
+    description: 'EXCEPCIÓN rara. NO la uses para ferretería/farmacia ni productos del catálogo. Solo si necesitas un dato físico fuera de BD que no sea pesaje (el pesaje usa solicitar_pesaje) ni flete (el sistema abre ticket de flete). En la práctica casi no la uses.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        producto: { type: Type.STRING, description: 'Artículo tal como lo pidió el cliente, con marca/medida/miligramos si los dio. Ej: "Acetaminofén 500mg", "tornillos de 2 pulgadas"' },
-        cantidad: { type: Type.STRING, description: 'Cantidad tal como la pidió el cliente. Ej: "1 caja", "2 blísteres", "10 unidades". Vacío si solo pregunta si hay.' },
-        tipo: { type: Type.STRING, enum: ['ferreteria', 'farmacia'], description: 'Tipo de artículo' },
+        producto: { type: Type.STRING, description: 'Qué hay que verificar físicamente' },
+        cantidad: { type: Type.STRING, description: 'Detalle opcional' },
+        tipo: { type: Type.STRING, enum: ['ferreteria', 'farmacia'], description: 'Clasificación interna si aplica' },
       },
       required: ['producto', 'tipo'],
     },
@@ -347,20 +371,31 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (!found.product) return { error: `"${producto}" no está en el catálogo.` };
 
       const p = found.product;
-      // "un aguacate", "3 plátanos": la IA a veces lo toma como kilos; si el cliente no habló de peso, se manda a pesar.
-      if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
+      let addQty = qty;
+
+      // "dame $2 de queso": convierte monto → kilos con el precio/kg de la BD (sin pesaje).
+      const moneyUsd = moneyAmountMentioned(customerText);
+      if (isSoldByWeight(p) && moneyUsd > 0 && p.precio > 0) {
+        addQty = round2(moneyUsd / p.precio);
+        if (!(addQty > 0)) return { error: 'No se pudo calcular el peso a partir del monto.' };
+      } else if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
+        // "un aguacate", "3 plátanos": unidades → balanza.
         const result = handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
-        return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos): se envió a pesar en caja en lugar de agregarlo por kilo.` };
+        return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos ni monto): se envió a pesar en caja.` };
       }
+
       const order = db.getOrCreateActiveOrder(phone);
       const existing = order.items.find((i) => i.nombre === p.nombre && i.presentacion === p.presentacion);
-      if (existing) existing.cantidad = round2(existing.cantidad + qty);
-      else order.items.push({ nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: qty, botellon: isBotellon(p) });
+      if (existing) existing.cantidad = round2(existing.cantidad + addQty);
+      else order.items.push({ nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
       order.status = 'abierto';
       db.saveOrder(order);
       state.cartChanged = true;
       state.catalogAdded = true;
-      return { ok: true, agregado: `${qty} x ${productLabel(p)}`, pedido: summarize(order, bcv) };
+      const nota = moneyUsd > 0 && isSoldByWeight(p)
+        ? `Calculado: $ ${moneyUsd.toFixed(2)} ÷ $ ${p.precio}/kg = ${addQty} kg (sin molestar al encargado).`
+        : undefined;
+      return { ok: true, agregado: `${addQty} x ${productLabel(p)}`, ...(nota ? { nota } : {}), pedido: summarize(order, bcv) };
     },
 
     solicitar_pesaje({ producto, cantidad }) {
@@ -470,11 +505,8 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       state.addressSaved = true;
 
       await notify(
-        `🛵 *Nuevo pedido #${order.id}*\n\n` +
-        `Cliente: *${name || 'Sin nombre'}* (+${phone})\n` +
-        `Dirección: ${order.address}\n\n` +
-        `${renderBoleta(order.items, bcv)}\n\n` +
-        `Escribirle: https://wa.me/${phone}`
+        `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\nDirección: ${order.address}\n\n${renderBoleta(order.items, bcv)}`,
+        { kind: 'order', phone, title: `Nuevo pedido #${order.id}`, whatsapp: false },
       );
       return { ok: true, pedido_numero: order.id, direccion: order.address, instruccion: 'Confirma al cliente que su pedido fue registrado e incluye los datos de Pago Móvil.' };
     },

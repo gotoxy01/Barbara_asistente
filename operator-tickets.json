@@ -1,0 +1,38 @@
+{
+  "seq": 1,
+  "editingTicketId": null,
+  "tickets": [
+    {
+      "ticketId": "T-1",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "tomates",
+          "presentacion": "por pesar",
+          "detalle": "tomates (5 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        },
+        {
+          "nombre": "tomates",
+          "presentacion": "por pesar",
+          "detalle": "tomates (5 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "¡Buenas tardes, Don Hector! Le saluda Bárbara de Abasto Los Cuchos. ¿Me podría indicar por favor el precio en dólares que prefiere colocarle a los tomates de su pedido, o si prefiere que hagamos algún ajuste? Quedo atenta.",
+      "estado": "CERRADO",
+      "motivo": "caja",
+      "createdAt": 1794975492501,
+      "updatedAt": 1794975536330
+    }
+  ]
+}

@@ -9,7 +9,7 @@ import { toBolivares } from './bcvService.js';
  */
 
 export const BCV_NOTE =
-  'Montos en Bs. calculados con la Tasa BCV del día. Métodos de pago: Pago Móvil, Transferencia en Bs. y Efectivo (USD o Bs.).';
+  'Montos en Bs. calculados con la Tasa BCV del día.';
 
 // ---------------------------------------------------------------------------
 // Normalización de texto

@@ -6,18 +6,24 @@ import qrcode from 'qrcode-terminal';
 import wweb from 'whatsapp-web.js';
 import { assertGeminiConfig, config } from './config.js';
 import * as db from './db.js';
-import { setSelfPhone, setSender } from './messenger.js';
+import { setChannel, setSelfPhone, setSender } from './messenger.js';
 import { enqueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
 import { getCatalogInfo } from './services/catalogService.js';
-import { handleCustomerMessage, notifyAdvisor, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
+import { startCrmServer } from './crm/server.js';
+import { info, verbose, warn } from './log.js';
+import { handleCustomerMessage, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
+import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
 
 const { Client, LocalAuth } = wweb;
 
 assertGeminiConfig();
 migrateLegacySession();
+
+// El buzón CRM abre de una vez (no espera a que WhatsApp termine de conectar).
+startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: config.wweb.sessionPath }),
@@ -148,7 +154,9 @@ async function getChatSafe(phone, chatId) {
   return null;
 }
 
+setChannel('wweb');
 setSender((phone, text) => sendToPhone(phone, text));
+// wweb no envía interactive Cloud API: messenger hace fallback a texto con payloads APPROVE_T-…
 
 // ---------------------------------------------------------------------------
 // Conversión de mensajes a texto
@@ -204,8 +212,10 @@ async function processIncoming(msg, phone, { groupName, chatId = msg.from } = {}
   const chat = await getChatSafe(phone, chatId);
   if (!groupName) chat?.sendSeen().catch(() => {});
 
-  if (!groupName && config.advisorPhone && phone === config.advisorPhone && msg.type === 'chat') {
-    if (await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) return;
+  if (!groupName && config.advisorPhone && phone === config.advisorPhone) {
+    const buttonId = msg.selectedButtonId || msg._data?.selectedButtonId || null;
+    if (await tryHandleOperatorInbound({ buttonId, text: msg.body, body: msg.body })) return;
+    if (msg.type === 'chat' && await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) return;
   }
 
   let text = await messageToText(msg);
@@ -214,15 +224,17 @@ async function processIncoming(msg, phone, { groupName, chatId = msg.from } = {}
   chat?.sendStateTyping().catch(() => {});
 
   const name = msg._data?.notifyName || (await msg.getContact().catch(() => null))?.pushname;
-  console.log(`[${phone}] Cliente${groupName ? ` (en el grupo "${groupName}")` : ''}: ${text.slice(0, 160)}`);
+  const who = name || `+${phone}`;
+  // Buzón limpio en consola: una sola línea por mensaje del cliente (sin volcar la respuesta de Bárbara).
+  info(`📩 ${who}${groupName ? ` · grupo` : ''}: ${text.replace(/\s+/g, ' ').trim().slice(0, 100)}`);
   const result = await handleCustomerMessage({ phone, name, text });
 
   if (result.paused && !result.reply) {
-    console.log(`[${phone}] Chat pausado (atendido por una persona): Bárbara no responde. Para reactivarla escriba en "Mensajes para mí": #reanudar ${phone}`);
+    verbose(`[${phone}] Chat pausado: Bárbara no responde.`);
   }
   if (result.reply) {
     await sendToPhone(phone, result.reply, chatId);
-    console.log(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
+    verbose(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
   }
   chat?.clearState().catch(() => {});
 }
@@ -284,9 +296,14 @@ client.on('message_create', async (msg) => {
   const own = serializeId(client.info?.wid);
   const phone = await resolvePhone(msg.to);
   if (msg.to === msg.from || msg.to === own || phone === getOwnPhone()) {
-    if (msg.type === 'chat' && msg.body.startsWith('#')) {
-      const quotedBody = await quotedBodyOf(msg);
-      enqueue('asesor', () => handleAdvisorCommand(msg.body, { quotedBody }));
+    if (['chat', 'buttons_response', 'list_response'].includes(msg.type)) {
+      enqueue('asesor', async () => {
+        const buttonId = msg.selectedButtonId || msg._data?.selectedButtonId || null;
+        if (await tryHandleOperatorInbound({ buttonId, text: msg.body, body: msg.body })) return;
+        if (msg.type === 'chat' && msg.body.startsWith('#')) {
+          await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) });
+        }
+      });
     }
     return;
   }
@@ -302,11 +319,7 @@ client.on('message_create', async (msg) => {
     recordAdvisorMessage(phone, msg.body);
     db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
     if (!wasPaused) {
-      console.log(`[${phone}] Respuesta manual desde el teléfono del negocio: Bárbara pausada ${config.manualPauseMinutes} min en este chat.`);
-      await notifyAdvisor(
-        `✋ Usted respondió a +${phone} desde el teléfono: Bárbara se pausa ${config.manualPauseMinutes} min en ese chat y luego se reactiva sola.\n` +
-        `Para reactivarla ya: #reanudar ${phone}`,
-      );
+      info(`[${phone}] Respuesta manual: Bárbara pausada ${config.manualPauseMinutes} min.`);
     }
   });
 });
@@ -362,7 +375,7 @@ client.on('call', async (call) => {
   console.log(`📞 Llamada ${call.isVideo ? 'de video ' : ''}de +${phone}: Bárbara sigue activa en ese chat.`);
 });
 
-client.on('change_state', (state) => console.log(`Estado de WhatsApp: ${state}`));
+client.on('change_state', (state) => verbose(`Estado de WhatsApp: ${state}`));
 
 // ---------------------------------------------------------------------------
 // Vigilancia de la conexión: si el internet o la PC se "duermen", WhatsApp Web queda

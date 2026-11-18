@@ -3,18 +3,27 @@
 import express from 'express';
 import { config, assertGeminiConfig, assertWhatsAppConfig } from './config.js';
 import * as db from './db.js';
-import { setSender } from './messenger.js';
+import { setChannel, setInteractiveSender, setSender } from './messenger.js';
 import { enqueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
 import { getCatalogInfo } from './services/catalogService.js';
 import { handleCustomerMessage } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
-import { downloadMedia, isValidSignature, markAsRead, sendText } from './whatsapp.js';
+import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
+import {
+  downloadMedia,
+  isValidSignature,
+  markAsRead,
+  sendInteractiveButtons,
+  sendText,
+} from './whatsapp.js';
 
 assertWhatsAppConfig();
 assertGeminiConfig();
+setChannel('cloud');
 setSender((phone, text) => sendText(phone, text));
+setInteractiveSender((phone, payload) => sendInteractiveButtons(phone, payload));
 
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
@@ -83,8 +92,16 @@ async function processMessage(message, name) {
 
   markAsRead(message.id).catch(() => {});
 
-  if (config.advisorPhone && message.from === config.advisorPhone && message.type === 'text') {
-    if (await handleAdvisorCommand(message.text.body)) return;
+  const isAdvisor = config.advisorPhone && message.from === config.advisorPhone;
+  if (isAdvisor) {
+    const buttonId = message.interactive?.button_reply?.id || message.button?.payload || null;
+    const text = message.type === 'text'
+      ? (message.text?.body ?? '')
+      : (message.interactive?.button_reply?.title ?? message.button?.text ?? '');
+    if (await tryHandleOperatorInbound({ buttonId, text, interactive: message.interactive, button: message.button })) {
+      return;
+    }
+    if (message.type === 'text' && await handleAdvisorCommand(message.text.body)) return;
   }
 
   const text = await messageToText(message);

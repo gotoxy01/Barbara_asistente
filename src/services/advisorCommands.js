@@ -4,6 +4,7 @@ import { sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
 import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { getTicket } from './ticketStore.js';
 
 const HELP =
   '*Comandos del asesor*\n' +
@@ -20,20 +21,33 @@ const HELP =
 
 const manualPauseMs = () => config.manualPauseMinutes * 60 * 1000;
 
-/** Cliente de una alerta de caja: "• *Cliente:* +584121234567 (Nombre)". */
+/** Confirmaciones de comandos WhatsApp: solo al chat consigo mismo, sin saturar el CRM. */
+function ack(text) {
+  return notifyAdvisor(text, { whatsapp: true, skipCrm: true });
+}
+
+/** Cliente de una alerta de caja / ficha telegráfica #T-… */
 function phoneFromAlert(text) {
-  return String(text ?? '').match(/Cliente:\*?\s*\+?(\d{8,15})/)?.[1] ?? null;
+  const t = String(text ?? '');
+  const ticketId = t.match(/#?(T-\d+)/i)?.[1];
+  if (ticketId) {
+    const ticket = getTicket(ticketId);
+    if (ticket?.clienteTelefono) return ticket.clienteTelefono;
+  }
+  return t.match(/Cliente:\*?\s*\+?(\d{8,15})/)?.[1]
+    ?? t.match(/\+(\d{8,15})/)?.[1]
+    ?? null;
 }
 
 async function handlePrice(body, quotedBody) {
   const match = body.match(/^#precio\s+(?:\+?(\d{8,15})\s+)?\$?\s*(\d+(?:[.,]\d{1,2})?)\s*\$?\s*$/i);
   if (!match) {
-    await notifyAdvisor('Formato inválido. Escriba el precio total en dólares, por ejemplo: #precio 1.50');
+    await ack('Formato inválido. Escriba el precio total en dólares, por ejemplo: #precio 1.50');
     return;
   }
   const usd = Number(match[2].replace(',', '.'));
   if (!(usd > 0)) {
-    await notifyAdvisor('El monto debe ser mayor que cero. Ejemplo: #precio 1.50');
+    await ack('El monto debe ser mayor que cero. Ejemplo: #precio 1.50');
     return;
   }
 
@@ -70,28 +84,28 @@ async function handleCancelOrder(args, quotedBody) {
   if (!phone) {
     const pending = db.getPendingOrders();
     if (!pending.length) {
-      await notifyAdvisor('No hay pedidos pendientes.');
+      await ack('No hay pedidos pendientes.');
       return;
     }
     const list = pending.map((o) => {
       const name = db.getChat(o.phone)?.name;
       return `• +${o.phone}${name ? ` (${name})` : ''}: ${describeOrder(o)}`;
     }).join('\n');
-    await notifyAdvisor(`📋 *Pedidos pendientes (${pending.length})*\n${list}\n\nPara borrar uno escriba: #b <teléfono>`);
+    await ack(`📋 *Pedidos pendientes (${pending.length})*\n${list}\n\nPara borrar uno escriba: #b <teléfono>`);
     return;
   }
   if (phone.length < 10) {
-    await notifyAdvisor('Número inválido. Ejemplo: #b 04141234567');
+    await ack('Número inválido. Ejemplo: #b 04141234567');
     return;
   }
 
   const cancelled = db.cancelPendingOrders(phone);
   if (!cancelled.length) {
-    await notifyAdvisor(`+${phone} no tiene pedidos pendientes.`);
+    await ack(`+${phone} no tiene pedidos pendientes.`);
     return;
   }
   console.log(`[${phone}] Pedido(s) cancelado(s) por el asesor: ${cancelled.map((o) => `#${o.id}`).join(', ')}`);
-  await notifyAdvisor(`🗑️ Pedido borrado para +${phone}:\n${cancelled.map((o) => `• ${describeOrder(o)}`).join('\n')}\n\nSi el cliente vuelve a escribir, empieza un pedido nuevo.`);
+  await ack(`🗑️ Pedido borrado para +${phone}:\n${cancelled.map((o) => `• ${describeOrder(o)}`).join('\n')}\n\nSi el cliente vuelve a escribir, empieza un pedido nuevo.`);
 }
 
 /** Cliente al que va dirigido el comando: el indicado, el de la alerta citada o el único que está esperando. */
@@ -101,25 +115,26 @@ async function pendingCustomer(explicitPhone, quotedBody, usage) {
   const waiting = db.getOrdersAwaitingWeight();
   if (waiting.length === 1) return waiting[0].phone;
   if (!waiting.length) {
-    await notifyAdvisor('No hay clientes esperando un pesaje o consulta.');
+    await ack('No hay clientes esperando un pesaje o consulta.');
     return null;
   }
   const list = waiting.map((o) => `• +${o.phone}: ${pendingWeighItems(o.items).map((i) => i.detalle).join('; ')}`).join('\n');
-  await notifyAdvisor(`Hay varios clientes esperando:\n${list}\n\nResponda a la alerta de ese cliente, o escriba: ${usage}`);
+  await ack(`Hay varios clientes esperando:\n${list}\n\nResponda a la alerta de ese cliente, o escriba: ${usage}`);
   return null;
 }
 
 async function deliverToCustomer(phone, result, confirmation) {
   if (result.error) {
-    await notifyAdvisor(`❌ ${result.error}`);
+    await ack(`❌ ${result.error}`);
     return;
   }
   try {
     await sendMessage(phone, result.message);
     db.addMessage(phone, 'model', result.message);
-    await notifyAdvisor(confirmation);
+    db.resolveAlertsByPhoneKind(phone, 'weigh');
+    await ack(confirmation);
   } catch (err) {
-    await notifyAdvisor(`❌ No se pudo enviar el mensaje a +${phone}: ${err.message}`);
+    await ack(`❌ No se pudo enviar el mensaje a +${phone}: ${err.message}`);
   }
 }
 
@@ -152,19 +167,19 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
 
   switch (command.toLowerCase()) {
     case 'ayuda':
-      await notifyAdvisor(HELP);
+      await ack(HELP);
       return true;
     case 'pausar':
       if (!phone) break;
       db.upsertChat(phone, null);
       db.pauseChat(phone);
-      await notifyAdvisor(`⏸️ Bárbara pausada para +${phone}.`);
+      await ack(`⏸️ Bárbara pausada para +${phone}.`);
       return true;
     case 'reanudar':
       if (!phone) break;
       db.upsertChat(phone, null);
       db.resumeChat(phone);
-      await notifyAdvisor(`▶️ Bárbara reactivada para +${phone}.`);
+      await ack(`▶️ Bárbara reactivada para +${phone}.`);
       return true;
     case 'r':
     case 'responder':
@@ -173,15 +188,15 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
         await sendMessage(phone, rest.trim());
         recordAdvisorMessage(phone, rest.trim());
         db.pauseChat(phone, manualPauseMs());
-        await notifyAdvisor(`✅ Enviado a +${phone}. Bárbara se reactiva sola en ${config.manualPauseMinutes} min.`);
+        await ack(`✅ Enviado a +${phone}. Bárbara se reactiva sola en ${config.manualPauseMinutes} min.`);
       } catch (err) {
-        await notifyAdvisor(`❌ No se pudo enviar a +${phone}: ${err.message}`);
+        await ack(`❌ No se pudo enviar a +${phone}: ${err.message}`);
       }
       return true;
     default:
       return false;
   }
 
-  await notifyAdvisor(`Formato inválido.\n\n${HELP}`);
+  await ack(`Formato inválido.\n\n${HELP}`);
   return true;
 }

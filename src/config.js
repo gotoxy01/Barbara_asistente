@@ -16,9 +16,17 @@ export const config = {
     sessionPath: process.env.WWEB_SESSION_PATH
       || path.join(process.env.LOCALAPPDATA || os.homedir(), 'barbara-los-cuchos', 'wwebjs_auth'),
     headless: !/^(0|false|no)$/i.test(process.env.WWEB_HEADLESS || 'true'),
-    debug: /^(1|true|si|sí|yes)$/i.test(process.env.WWEB_DEBUG || 'true'),
+    // false por defecto: la consola no se llena con cada mensaje de WhatsApp.
+    debug: /^(1|true|si|sí|yes)$/i.test(process.env.WWEB_DEBUG || 'false'),
     // Grupos donde Bárbara atiende a quien escribe, pero siempre respondiéndole por privado.
     groupNames: (process.env.WWEB_GROUPS ?? 'Bodega los cuchos').split(',').map((g) => g.trim()).filter(Boolean),
+  },
+  // true = imprime cada Cliente / Bárbara respondió (útil para depurar).
+  logVerbose: /^(1|true|si|sí|yes)$/i.test(process.env.LOG_VERBOSE || 'false'),
+  crm: {
+    host: process.env.CRM_HOST || '127.0.0.1',
+    port: Number(process.env.CRM_PORT || 3847),
+    token: process.env.CRM_TOKEN || 'barbara-crm',
   },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN || '',
@@ -39,6 +47,18 @@ export const config = {
     // Modelo que se usa si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
     fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-2.5-flash',
     timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 20000),
+  },
+  // Segunda pasada: revisa precios/cálculos del borrador antes de WhatsApp. AUDITOR_ENABLED=false para desactivar.
+  auditor: {
+    enabled: !/^(0|false|no)$/i.test(process.env.AUDITOR_ENABLED || 'true'),
+    // Vacío = mismo modelo que Bárbara (flash). Puede fijar uno más barato si quiere.
+    model: process.env.AUDITOR_MODEL || '',
+  },
+  // Aprobación 1-tap del operador (botones interactive Cloud API / texto en wweb).
+  operatorConsole: {
+    enabled: !/^(0|false|no)$/i.test(process.env.OPERATOR_BUTTONS_ENABLED || 'true'),
+    highOrderUsd: Number(process.env.OPERATOR_HIGH_ORDER_USD || 50),
+    persistTickets: !/^(0|false|no)$/i.test(process.env.OPERATOR_TICKETS_PERSIST || 'true'),
   },
   advisorPhone: (process.env.ADVISOR_PHONE || '').replace(/\D/g, ''),
   pauseHours: Number(process.env.BOT_PAUSE_HOURS || 12),
