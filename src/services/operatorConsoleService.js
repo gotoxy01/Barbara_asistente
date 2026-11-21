@@ -150,14 +150,19 @@ export async function solicitarAprobacionRapida({
     db.addAdvisorAlert({
       kind: motivo === 'pago' ? 'payment' : motivo === 'flete' ? 'order' : 'weigh',
       phone,
-      title: `Ticket ${ticket.ticketId}`,
+      title: `Nota ${ticket.ticketId}`,
       body: resumenTicket(ticket),
     });
   } catch {
     // CRM opcional
   }
 
-  await enviarSolicitudConBotones(ticket);
+  // Por defecto solo bloc de notas del CRM; WhatsApp al operador es opcional.
+  if (config.operatorConsole.whatsappPing) {
+    await enviarSolicitudConBotones(ticket);
+  } else {
+    info(`📝 ${ticket.ticketId} → bloc de notas CRM (sin ping WhatsApp)`);
+  }
   return {
     ticket,
     holdReply: motivo === 'flete' ? HOLD_FLETE : null,

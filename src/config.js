@@ -54,11 +54,13 @@ export const config = {
     // Vacío = mismo modelo que Bárbara (flash). Puede fijar uno más barato si quiere.
     model: process.env.AUDITOR_MODEL || '',
   },
-  // Aprobación 1-tap del operador (botones interactive Cloud API / texto en wweb).
+  // Requerimientos físicos → bloc de notas del CRM. WhatsApp al operador solo si OPERATOR_WA_PING=true.
   operatorConsole: {
     enabled: !/^(0|false|no)$/i.test(process.env.OPERATOR_BUTTONS_ENABLED || 'true'),
     highOrderUsd: Number(process.env.OPERATOR_HIGH_ORDER_USD || 50),
     persistTickets: !/^(0|false|no)$/i.test(process.env.OPERATOR_TICKETS_PERSIST || 'true'),
+    // false por defecto: no saturar "Mensajes para mí"; se atiende en http://127.0.0.1:3847
+    whatsappPing: /^(1|true|si|sí|yes)$/i.test(process.env.OPERATOR_WA_PING || 'false'),
   },
   advisorPhone: (process.env.ADVISOR_PHONE || '').replace(/\D/g, ''),
   pauseHours: Number(process.env.BOT_PAUSE_HOURS || 12),

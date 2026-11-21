@@ -8,6 +8,16 @@ import { info, warn } from '../log.js';
 import { sendMessage } from '../messenger.js';
 import { getBcvRate } from '../services/bcvService.js';
 import { recordAdvisorMessage } from '../services/chatService.js';
+import {
+  getNoteById,
+  listNotes,
+  noteDismiss,
+  noteKitchenStatus,
+  noteNoStock,
+  notePayment,
+  noteSetFreight,
+  noteSetPrice,
+} from '../services/notesService.js';
 import { applyNotAvailable, applyWeighedPrice } from '../services/orderService.js';
 import { subscribeCrm } from './events.js';
 
@@ -103,6 +113,85 @@ function createApp() {
     res.json({ ok: true });
   });
 
+  // --- Bloc de notas (requerimientos físicos: pesaje, flete, pago) ---
+  app.get('/api/notes', async (_req, res) => {
+    try {
+      res.json({ notes: await listNotes() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/notes/:ticketId', async (req, res) => {
+    const previewUsd = req.query.usd != null ? Number(String(req.query.usd).replace(',', '.')) : null;
+    const note = await getNoteById(req.params.ticketId, { previewUsd });
+    if (!note) return res.status(404).json({ error: 'Nota no encontrada' });
+    res.json({ note });
+  });
+
+  app.post('/api/notes/:ticketId/kitchen', async (req, res) => {
+    try {
+      const result = await noteKitchenStatus(req.params.ticketId, String(req.body?.status || ''), {
+        notifyCustomer: req.body?.notifyCustomer !== false,
+      });
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/notes/:ticketId/precio', async (req, res) => {
+    const usd = Number(String(req.body?.usd ?? '').replace(',', '.'));
+    try {
+      const result = await noteSetPrice(req.params.ticketId, usd);
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/notes/:ticketId/nohay', async (req, res) => {
+    try {
+      const result = await noteNoStock(req.params.ticketId);
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/notes/:ticketId/flete', async (req, res) => {
+    const usd = Number(String(req.body?.usd ?? '').replace(',', '.'));
+    try {
+      const result = await noteSetFreight(req.params.ticketId, usd);
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/notes/:ticketId/pago', async (req, res) => {
+    try {
+      const result = await notePayment(req.params.ticketId, {
+        ok: req.body?.ok !== false,
+        mensaje: req.body?.mensaje,
+      });
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/notes/:ticketId/dismiss', async (req, res) => {
+    const result = await noteDismiss(req.params.ticketId);
+    if (result.error) return res.status(400).json({ error: result.error });
+    return res.json(result);
+  });
+
   app.post('/api/caja/:phone/precio', async (req, res) => {
     const phone = String(req.params.phone || '').replace(/\D/g, '');
     const usd = Number(String(req.body?.usd ?? '').replace(',', '.'));
@@ -115,7 +204,7 @@ function createApp() {
       await sendMessage(phone, result.message);
       db.addMessage(phone, 'model', result.message);
       db.resolveAlertsByPhoneKind(phone, 'weigh');
-      return res.json({ ok: true });
+      return res.json({ ok: true, message: result.message });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });
     }
@@ -131,7 +220,7 @@ function createApp() {
       await sendMessage(phone, result.message);
       db.addMessage(phone, 'model', result.message);
       db.resolveAlertsByPhoneKind(phone, 'weigh');
-      return res.json({ ok: true });
+      return res.json({ ok: true, message: result.message });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });
     }

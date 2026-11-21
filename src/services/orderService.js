@@ -367,8 +367,21 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       const qty = Number(cantidad);
       if (!(qty > 0)) return { error: 'La cantidad debe ser mayor que cero.' };
       const found = findProduct(String(producto ?? ''));
-      if (found.options) return { error: 'Hay varios productos parecidos; pregunte al cliente cuál desea.', opciones: optionsList(found.options) };
-      if (!found.product) return { error: `"${producto}" no está en el catálogo.` };
+      if (found.options) {
+        return {
+          error: found.soft
+            ? 'No hay coincidencia exacta; hay productos parecidos (posible error de escritura u otro nombre). Pregunte cuál desea.'
+            : 'Hay varios productos parecidos; pregunte al cliente cuál desea.',
+          opciones: optionsList(found.options),
+          instruccion: 'Muestre las opciones con su nombre exacto del catálogo y precios. No diga que no hay hasta que el cliente descarte todas.',
+        };
+      }
+      if (!found.product) {
+        return {
+          error: `"${producto}" no está en el catálogo.`,
+          instruccion: 'Diga que por ahora no lo tenemos. Si en el contexto del catálogo hay SUGERENCIAS CERCANAS, ofrezca UNA. No invente productos fuera del catálogo.',
+        };
+      }
 
       const p = found.product;
       let addQty = qty;
@@ -501,12 +514,13 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
       order.address = address;
       order.status = 'recibido';
+      order.kitchen_status = 'nuevo';
       db.saveOrder(order);
       state.addressSaved = true;
 
       await notify(
         `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\nDirección: ${order.address}\n\n${renderBoleta(order.items, bcv)}`,
-        { kind: 'order', phone, title: `Nuevo pedido #${order.id}`, whatsapp: false },
+        { kind: 'order', phone, title: `Comanda #${order.id}`, whatsapp: false },
       );
       return { ok: true, pedido_numero: order.id, direccion: order.address, instruccion: 'Confirma al cliente que su pedido fue registrado e incluye los datos de Pago Móvil.' };
     },

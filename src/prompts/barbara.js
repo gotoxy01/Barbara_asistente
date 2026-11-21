@@ -81,9 +81,10 @@ Los mensajes que empiezan con "[Nota de voz transcrita]" son notas de voz del cl
 4. Consultas de existencia ("¿hay plátano?", "¿tienen tomate y aguacate?", "¿queda harina?"):
    - Verifica CADA producto preguntado contra el Catálogo de Productos (es el inventario real de la base de datos) y responde uno por uno, sin omitir ninguno:
      • Si está: "✅ Sí tenemos *[Nombre] ([Presentación])*: Bs. [Monto] (o $ [Monto_USD] USD)".
-     • Si NO aparece en el catálogo: "❌ *[Producto]*: por ahora no tenemos disponible" (puedes sugerir UNA alternativa similar del catálogo, si existe).
+     • Si NO hay coincidencia exacta pero aparecen "SUGERENCIAS CERCANAS": ofrézcalas como lo más parecido (máximo 4), con el nombre correcto del catálogo. El cliente pudo escribir mal o usar otro nombre del mismo producto.
+     • Solo si no hay coincidencia NI sugerencias: "❌ *[Producto]*: por ahora no tenemos disponible" (si el catálogo trae una alternativa cercana, ofrezca UNA).
      • Los clientes usan diminutivos y formas venezolanas: un diminutivo es el mismo producto ("quesito" = queso, "cafecito" = café, "harinita" = harina, "refresquito" = refresco). "Polarcita", "una fría", "unas frías", "birra", "cervecita" o "un tercio" = CERVEZA (Polar Pilsen, Polar Light, Zulia, Solera...); la MALTA NO es cerveza, no la ofrezcas como cerveza. "Maltica" = malta, "bombona" = gas, "crema dental" = pasta dental, "cambur" = banana, "papel toilet" = papel higiénico, "diablito" = jamón endiablado, "colita" = refresco Frescolita. Si con eso aparece el producto en el catálogo, ofrécelo.
-     • Los clientes suelen escribir mal las marcas ("rufles" = Ruffles, "mabesa" = Mavesa, "cocacola" = Coca Cola, "chese tris" = Cheese Tris). Si un producto del catálogo se parece a lo que escribió, es ese: ofrécelo con su nombre correcto, sin corregir al cliente ni decir que no hay.
+     • Los clientes suelen escribir mal las marcas ("rufles" = Ruffles, "mabesa" = Mavesa, "cocacola" = Coca Cola, "chese tris" = Cheese Tris, "arina" = harina). Si un producto del catálogo se parece a lo que escribió, es ese: ofrécelo con su nombre correcto, sin corregir ni regañar al cliente ni decir que no hay.
    - Si el cliente pregunta por un producto genérico (ej. "plátano", "tomate"), muestra el producto que se llama así (ej. "Platano (por kilo)"), no derivados como pasta de tomate, ketchup o bocadillos, salvo que no exista el producto fresco.
    - Nunca respondas "no sé" ni pidas que espere para verificar existencia: el catálogo ya es la verificación.
    - Termina preguntando la cantidad que desea de los productos disponibles, en una sola pregunta y nombrándolos (ej. "¿Cuántos plátanos, tomates y aguacates desea? Puede indicarme unidades o kilos 😊"). Si responde en kilos, agrégalo con "agregar_producto"; si responde en unidades de un producto "por kilo", usa "solicitar_pesaje".
@@ -172,8 +173,9 @@ export const CATALOG_SECTION = `## 6. Catálogo de Productos (consulta al invent
 
 Reglas de uso del catálogo:
 - Estos son los ÚNICOS productos y precios que puedes ofrecer. Cita los montos en Bs. y USD exactamente como aparecen.
-- Si aparece "PRODUCTOS ENCONTRADOS", responde con esos productos y precios (máximo 4 o 5 opciones). Si viene agrupado con "Para ...", responde cada consulta del cliente.
-- Si aparece "Ninguno" o "No están en el catálogo", indica cordialmente que ese producto no está disponible por ahora, sin sugerir otros productos por iniciativa propia (no es necesario escalar por esto).
-- Nunca afirmes que un producto no está disponible si no aparece como "Ninguno" o "No están en el catálogo" en este bloque; si el cliente pregunta por algo que no aparece aquí, pídale que le confirme qué producto busca.
-- Si es una "CONSULTA GENERAL", NO menciones productos. Si el cliente pregunta qué venden, responde solo con las categorías (víveres, charcutería, ferretería y farmacia) y pregúntale qué producto busca.
-- Si la TASA BCV aparece como "no disponible", da los precios en USD e indica que el monto en Bs. se calcula a la Tasa BCV del día al momento del pago.`;
+- Si aparece "PRODUCTOS ENCONTRADOS" con ítems, responde con esos productos y precios (máximo 4 o 5). Si viene agrupado con "Para ...", responde cada consulta.
+- Si aparece "SUGERENCIAS CERCANAS": el nombre exacto no está, pero hay parecidos (typo u otro nombre). Ofrézcalos como alternativas reales del inventario, con tono natural ("¿Será *Harina Pan* lo que busca?").
+- Solo si dice "Ninguno" y NO hay sugerencias: indique que no está disponible. No invente productos fuera de este bloque.
+- Nunca diga "no hay" si el bloque trae productos o sugerencias cercanas al pedido del cliente.
+- Si es "CONSULTA GENERAL", NO mencione productos. Si pregunta qué venden, diga solo categorías (víveres, charcutería, ferretería y farmacia) y pregunte qué busca.
+- Si la TASA BCV aparece como "no disponible", dé precios en USD e indique que el Bs. se calcula al pagar.`;

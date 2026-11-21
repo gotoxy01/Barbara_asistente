@@ -3,50 +3,81 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Buzón · Los Cuchos</title>
+  <title>Bloc · Los Cuchos</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="app">
-    <aside class="inbox">
+    <aside class="notes-rail">
       <header class="inbox-head">
         <div>
-          <h1>Buzón</h1>
-          <p class="sub">Abasto Los Cuchos</p>
+          <h1>Bloc de notas</h1>
+          <p class="sub">Solo lo que falta en caja</p>
         </div>
-        <button type="button" id="btnOrders" class="chip" title="Pedidos de hoy">Pedidos</button>
+        <span id="noteCount" class="count">0</span>
       </header>
-
-      <section class="attention" aria-label="Atención">
-        <div class="attention-head">
-          <strong>Atención</strong>
-          <span id="alertCount" class="count">0</span>
-        </div>
-        <div id="alertList" class="alert-list">
-          <p class="empty tiny">Sin pendientes de caja.</p>
-        </div>
-      </section>
-
-      <div id="chatList" class="inbox-list"></div>
+      <div id="noteList" class="note-list">
+        <p class="empty tiny">Sin notas pendientes.</p>
+      </div>
       <footer class="inbox-foot">
         <span id="status">Cargando…</span>
         <button type="button" id="btnRefresh" class="linkish">Actualizar</button>
       </footer>
     </aside>
 
-    <section class="pane">
-      <header id="threadHead" class="pane-head">
+    <section class="note-pane">
+      <header class="pane-head">
         <div>
-          <strong id="threadName">Seleccione un chat</strong>
-          <div id="threadMeta" class="sub"></div>
+          <strong id="noteTitle">Seleccione una nota</strong>
+          <div id="noteMeta" class="sub"></div>
+        </div>
+        <div class="head-actions">
+          <button type="button" id="btnOrders" class="chip">Pedidos</button>
+          <button type="button" id="btnToggleChats" class="chip">Chats</button>
         </div>
       </header>
-      <div id="messages" class="thread"></div>
-      <form id="replyForm" class="composer" hidden>
-        <textarea id="replyText" rows="2" placeholder="Responder al cliente…" required></textarea>
-        <button type="submit" class="send">Enviar</button>
-      </form>
+
+      <div id="noteEmpty" class="empty pad">Cuando Bárbara necesite pesaje, flete o validar un pago, aparece aquí como nota numerada.</div>
+
+      <div id="noteBody" class="note-body" hidden>
+        <div class="req-block">
+          <h2>Requerimiento</h2>
+          <div id="reqText" class="req-text"></div>
+          <ul id="reqItems" class="req-items"></ul>
+        </div>
+
+        <div class="action-block" id="actionBlock"></div>
+
+        <div class="preview-block">
+          <h2>Producto final (vista previa)</h2>
+          <pre id="previewBox" class="preview-box">Escriba el precio para ver el mensaje que recibirá el cliente.</pre>
+          <div id="previewTotal" class="preview-total"></div>
+        </div>
+      </div>
     </section>
+
+    <aside class="inbox" id="chatsPanel" hidden>
+      <header class="inbox-head">
+        <div>
+          <h1>Chats</h1>
+          <p class="sub">WhatsApp</p>
+        </div>
+      </header>
+      <div id="chatList" class="inbox-list"></div>
+      <div class="chat-side">
+        <header class="pane-head tight">
+          <div>
+            <strong id="threadName">Chat</strong>
+            <div id="threadMeta" class="sub"></div>
+          </div>
+        </header>
+        <div id="messages" class="thread"></div>
+        <form id="replyForm" class="composer" hidden>
+          <textarea id="replyText" rows="2" placeholder="Responder al cliente…" required></textarea>
+          <button type="submit" class="send">Enviar</button>
+        </form>
+      </div>
+    </aside>
   </div>
 
   <dialog id="ordersDialog">

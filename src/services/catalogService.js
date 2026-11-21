@@ -70,21 +70,63 @@ const SYNONYMS = {
   diablito: ['diablito', 'underwood', 'endiablado'],
   mantequilla: ['mantequilla', 'margarina', 'mavesa', 'nelly'],
   margarina: ['mantequilla', 'margarina'],
-  ketchup: ['ketchup', 'tomate'],
+  ketchup: ['ketchup', 'salsa'],
   banana: ['cambur', 'banana'],
+  cambur: ['cambur', 'banana'],
   sandia: ['patilla', 'sandia'],
+  patilla: ['patilla', 'sandia'],
   papaya: ['lechosa', 'papaya'],
+  lechosa: ['lechosa', 'papaya'],
   maracuya: ['parchita', 'maracuya'],
+  parchita: ['parchita', 'maracuya'],
   calabaza: ['auyama', 'calabaza'],
+  auyama: ['auyama', 'calabaza'],
   frijol: ['caraota', 'frijol'],
+  caraota: ['caraota', 'frijol'],
   pimiento: ['pimenton', 'pimiento'],
+  pimenton: ['pimenton', 'pimiento'],
   palomita: ['cotufa', 'palomita'],
+  cotufa: ['cotufa', 'palomita'],
   ponque: ['ponque', 'torta', 'bizcocho'],
   chupeta: ['chupeta', 'chupetin', 'colombina'],
   molde: ['molde', 'sandwich', 'cuadrado'],
   lavaplato: ['lavaplato', 'lavavajilla'],
   cigarro: ['cigarro', 'cigarrillo'],
   cigarrillo: ['cigarro', 'cigarrillo'],
+  // Marca ↔ genérico / typos frecuentes
+  clorox: ['cloro', 'hipoclorito', 'blanqueador', 'clorox'],
+  cloro: ['cloro', 'hipoclorito', 'blanqueador', 'clorox'],
+  hipoclorito: ['cloro', 'hipoclorito', 'blanqueador', 'clorox'],
+  cafe: ['cafe', 'nescafe', 'soluble', 'lavazza'],
+  nescafe: ['cafe', 'nescafe', 'soluble'],
+  azucar: ['azucar', 'refined', 'morena'],
+  harina: ['harina', 'pan', 'premia', 'cantex'],
+  aceite: ['aceite', 'mazeite', 'vegetal'],
+  arroz: ['arroz', 'mary', 'primor', 'camino'],
+  leche: ['leche', 'completa', 'deslactosada'],
+  yogurt: ['yogurt', 'yogourt', 'yakult'],
+  yogourt: ['yogurt', 'yogourt'],
+  mayonesa: ['mayonesa', 'mavesa', 'hellmann'],
+  mavesa: ['mayonesa', 'mavesa', 'margarina'],
+  mabesa: ['mayonesa', 'mavesa', 'margarina'],
+  rufles: ['ruffles', 'rufles', 'papas'],
+  ruffles: ['ruffles', 'rufles', 'papas'],
+  chesetris: ['cheese', 'tris', 'cheetos'],
+  chese: ['cheese', 'tris', 'cheetos'],
+  cocacola: ['coca', 'cola'],
+  pepsi: ['pepsi', 'refresco'],
+  papel: ['higienico', 'toilet', 'servilleta'],
+  higienico: ['higienico', 'toilet', 'papel'],
+  jabon: ['jabon', 'dove', 'protex', 'lagarto', 'detergente'],
+  shampoo: ['shampoo', 'champu', 'head'],
+  champu: ['shampoo', 'champu'],
+  pan: ['pan', 'bimbo', 'molde', 'canilla'],
+  huevo: ['huevo', 'cartón', 'carton'],
+  queso: ['queso', 'paisa', 'amarillo', 'blanco', 'gonda'],
+  jamon: ['jamon', 'pierna', 'pavo', 'endiablado'],
+  mortadela: ['mortadela', 'bologna'],
+  pollo: ['pollo', 'muslo', 'pechuga', 'ala'],
+  carne: ['carne', 'molida', 'res', 'guisar'],
 };
 
 /** Sinónimos de la palabra en singular o plural ("frías", "pilas", "fósforos"). */
@@ -177,15 +219,54 @@ function strictMatch(queryToken, productToken) {
   return queryToken === productToken || (queryToken.length >= 4 && productToken.startsWith(queryToken));
 }
 
-/** Tolerancia a errores de tipeo: igual por sonido; si no, 1 letra distinta (2 en palabras largas). Las palabras cortas solo por sonido. */
+/**
+ * Tolerancia a errores de tipeo / escritura fonética.
+ * Palabras ≥3: igualdad fonética. ≥4: también 1–2 letras de diferencia (incluye trasposiciones).
+ */
 function fuzzyMatch(queryToken, productToken) {
-  if (queryToken.length < 4 || productToken.length < 4) return false;
+  if (queryToken.length < 3 || productToken.length < 3) return false;
   const a = phonetic(queryToken);
   const b = phonetic(productToken);
-  if (a === b || (a.length >= 5 && b.startsWith(a))) return true;
-  if (Math.min(a.length, b.length) < 5) return false;
+  if (a === b) return true;
+  if (a.length >= 4 && b.startsWith(a)) return true;
+  if (Math.min(a.length, b.length) < 4) return false;
   const max = Math.min(a.length, b.length) >= 8 ? 2 : 1;
   return levenshtein(a, b, max) <= max;
+}
+
+/**
+ * Cuando no hay coincidencia directa: busca productos con nombre distinto pero cercano
+ * (typo, sinónimo o token parecido). No inventa fuera del catálogo.
+ */
+function softSuggest(query, products, limit = 5) {
+  const words = [...new Set(
+    normalize(query)
+      .split(/[\s.,/]+/)
+      .filter((w) => w.length >= 2 && !STOPWORDS.has(w) && !/^\d+$/.test(w)),
+  )];
+  if (!words.length) return [];
+
+  const scored = products.map((p) => {
+    let best = 0;
+    for (const word of words) {
+      const fromSyn = synonymsOf(word) ?? [word];
+      const fromDim = diminutiveBases(word).flatMap((b) => synonymsOf(b) ?? [b]);
+      const variants = [...new Set([...fromSyn, ...fromDim, word].map(stem))];
+      for (const v of variants) {
+        for (const t of p.nameTokens) {
+          if (strictMatch(v, t)) best = Math.max(best, 4);
+          else if (fuzzyMatch(v, t)) best = Math.max(best, 3);
+          else if (v.length >= 3 && t.includes(v)) best = Math.max(best, 2);
+          else if (t.length >= 3 && v.includes(t)) best = Math.max(best, 1.5);
+        }
+      }
+    }
+    return { p, score: best };
+  })
+    .filter((r) => r.score >= 1.5)
+    .sort((a, b) => b.score - a.score || a.p.nombre.length - b.p.nombre.length);
+
+  return scored.slice(0, limit).map((r) => r.p);
 }
 
 // ---------------------------------------------------------------------------
@@ -454,9 +535,16 @@ export function findProduct(query) {
   if (byName.length > 1) return { options: byName.slice(0, 5) };
 
   const { ranked } = rankProducts(query, products);
-  if (!ranked.length) return {};
-  if (ranked.length === 1 || ranked[0].score > ranked[1].score) return { product: ranked[0].p };
-  return { options: ranked.slice(0, 5).map((r) => r.p) };
+  if (ranked.length) {
+    if (ranked.length === 1 || ranked[0].score > ranked[1].score) return { product: ranked[0].p };
+    return { options: ranked.slice(0, 5).map((r) => r.p) };
+  }
+
+  // Typo / nombre distinto al de la BD: ofrecer cercanos en lugar de fallar en seco.
+  const soft = softSuggest(query, products, 5);
+  if (soft.length === 1) return { product: soft[0], soft: true };
+  if (soft.length > 1) return { options: soft, soft: true };
+  return {};
 }
 
 /**
@@ -498,10 +586,25 @@ export function searchProducts(queries, { bcv = null } = {}) {
     return { type: 'matches', terms, products: [...shown], text: lines.join('\n') };
   }
 
+  if (!terms.length) {
+    lines.push('CONSULTA GENERAL (sin un producto específico): no menciones productos.');
+    return { type: 'none', terms, products: [], text: lines.join('\n') };
+  }
+
+  const soft = softSuggest(terms.join(' '), products, Math.min(5, config.catalog.maxResults));
+  if (soft.length) {
+    lines.push(
+      `PRODUCTOS ENCONTRADOS: Ninguno con el nombre exacto "${terms.join(' ')}".`,
+      'SUGERENCIAS CERCANAS (el cliente pudo escribir mal el nombre o usar otro nombre del mismo producto):',
+      ...soft.map((p) => formatProduct(p, bcv)),
+      'Ofrezca estas opciones como lo más parecido, con su nombre correcto del catálogo, sin regañar al cliente por la escritura. Si ninguna encaja con lo que pidió, diga que no hay disponible.',
+      BCV_NOTE,
+    );
+    return { type: 'matches', terms, products: soft, text: lines.join('\n'), soft: true };
+  }
+
   lines.push(
-    terms.length
-      ? `PRODUCTOS ENCONTRADOS: Ninguno. (El producto no está en el catálogo). Búsqueda realizada: "${terms.join(' ')}".`
-      : 'CONSULTA GENERAL (sin un producto específico): no menciones productos.',
+    `PRODUCTOS ENCONTRADOS: Ninguno. (El producto no está en el catálogo). Búsqueda realizada: "${terms.join(' ')}".`,
   );
   return { type: 'none', terms, products: [], text: lines.join('\n') };
 }

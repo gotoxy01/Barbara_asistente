@@ -51,6 +51,8 @@ function addColumnIfMissing(table, column, definition) {
 addColumnIfMissing('chats', 'paused_until', 'INTEGER');
 // El cliente pidió la boleta mientras había productos por pesar: se envía en cuanto llegue el precio.
 addColumnIfMissing('orders', 'boleta_pendiente', 'INTEGER NOT NULL DEFAULT 0');
+// Comanda de cocina/despacho tras cerrar el pedido: nuevo | preparado | atendido | cancelado.
+addColumnIfMissing('orders', 'kitchen_status', "TEXT NOT NULL DEFAULT 'nuevo'");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS advisor_alerts (
@@ -96,12 +98,21 @@ const stmts = {
   activeOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta') ORDER BY id DESC`),
   pendingOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta', 'recibido') AND items != '[]' AND updated_at >= ? ORDER BY id`),
   pendingOrdersOf: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta', 'recibido') ORDER BY id`),
-  cancelOrder: db.prepare(`UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ? WHERE id = ?`),
+  cancelOrder: db.prepare(`UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, kitchen_status = 'cancelado', updated_at = ? WHERE id = ?`),
   createOrder: db.prepare('INSERT INTO orders (phone, created_at, updated_at) VALUES (?, ?, ?)'),
   getOrder: db.prepare('SELECT * FROM orders WHERE id = ?'),
   updateOrder: db.prepare(`
-    UPDATE orders SET status = ?, items = ?, address = ?, total_usd = ?, total_bs = ?, bcv_rate = ?, boleta_pendiente = ?, updated_at = ?
+    UPDATE orders SET status = ?, items = ?, address = ?, total_usd = ?, total_bs = ?, bcv_rate = ?, boleta_pendiente = ?, kitchen_status = ?, updated_at = ?
     WHERE id = ?
+  `),
+  kitchenBoard: db.prepare(`
+    SELECT * FROM orders
+    WHERE status = 'recibido' AND kitchen_status IN ('nuevo', 'preparado') AND items != '[]'
+    ORDER BY created_at ASC
+    LIMIT ?
+  `),
+  setKitchenStatus: db.prepare(`
+    UPDATE orders SET kitchen_status = ?, updated_at = ? WHERE id = ? AND status = 'recibido'
   `),
   listChats: db.prepare(`
     SELECT c.phone, c.name, c.paused, c.paused_until,
@@ -291,10 +302,35 @@ export function getOrCreateActiveOrder(phone) {
 }
 
 export function saveOrder(order) {
+  const kitchen = order.kitchen_status
+    || (order.status === 'recibido' ? 'nuevo' : 'nuevo');
   stmts.updateOrder.run(
     order.status, JSON.stringify(order.items), order.address ?? null,
-    order.total_usd ?? null, order.total_bs ?? null, order.bcv_rate ?? null, order.boleta_pendiente ? 1 : 0, Date.now(), order.id,
+    order.total_usd ?? null, order.total_bs ?? null, order.bcv_rate ?? null, order.boleta_pendiente ? 1 : 0,
+    kitchen, Date.now(), order.id,
   );
+}
+
+/** Pedidos cerrados pendientes de cocina/despacho (comandas del bloc). */
+export function listKitchenOrders(limit = 40) {
+  return stmts.kitchenBoard.all(limit).map(parseOrder);
+}
+
+/**
+ * @param {number} orderId
+ * @param {'nuevo'|'preparado'|'atendido'|'cancelado'} status
+ */
+export function setKitchenStatus(orderId, status) {
+  const allowed = new Set(['nuevo', 'preparado', 'atendido', 'cancelado']);
+  if (!allowed.has(status)) return null;
+  stmts.setKitchenStatus.run(status, Date.now(), orderId);
+  const order = parseOrder(stmts.getOrder.get(orderId));
+  if (order) publishCrm({ type: 'kitchen', orderId: order.id, kitchenStatus: status, phone: order.phone });
+  return order;
+}
+
+export function getOrderById(id) {
+  return parseOrder(stmts.getOrder.get(id));
 }
 
 /** Devuelve true si el mensaje es nuevo; false si Meta lo está reenviando. */
