@@ -2,13 +2,22 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   token: localStorage.getItem('crmToken') || '',
+  selectedId: null,
   phone: null,
-  noteId: null,
+  detail: null,
+  orders: [],
+  caja: [],
+  rail: [],
+  doneRail: [],
+  pendingPriceNote: null,
   es: null,
-  chats: [],
-  notes: [],
-  chatsOpen: localStorage.getItem('crmChatsOpen') === '1',
 };
+
+function isFinishedNote(note) {
+  if (note.motivo !== 'pedido') return false;
+  const s = note.kitchenStatus || 'nuevo';
+  return s === 'atendido' || s === 'cancelado' || note.order?.status === 'cancelado';
+}
 
 function isLocalHost() {
   return ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -42,522 +51,679 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-function preview(text) {
-  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 72) || '(sin texto)';
-}
-
 function formatWhen(ms) {
   if (!ms) return '';
   const d = new Date(ms);
   const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  return sameDay
-    ? d.toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString('es-VE', { day: '2-digit', month: '2-digit' });
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString('es-VE', { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleString('es-VE', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
-function setStatus(text, ok = true) {
-  const el = $('status');
+function money(usd, bs) {
+  if (usd == null && bs == null) return '';
+  if (bs != null) return `Bs. ${Number(bs).toFixed(2)}`;
+  return `$ ${Number(usd).toFixed(2)}`;
+}
+
+function toast(text, ms = 2200) {
+  const el = $('toast');
   el.textContent = text;
-  el.className = ok ? '' : 'error';
+  el.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.hidden = true; }, ms);
 }
 
-function motivoLabel(m) {
-  return ({
-    pesaje: 'Pesaje', caja: 'Pesaje', flete: 'Flete', pago: 'Pago', payment: 'Pago',
-    pedido: 'Pedido', order: 'Pedido',
-  })[m] || m || 'Nota';
+function itemIcon(name = '') {
+  const n = String(name).toLowerCase();
+  if (/tomate|piment|cebolla|lechuga|verdura|aguacate|lim[oó]n|cilantro|ajo|papa|yuca|zanahoria|repollo/.test(n)) return '🥬';
+  if (/queso|ricotta|mozzarella/.test(n)) return '🧀';
+  if (/jam[oó]n|mortadela|carne|pollo|chorizo|salchicha|res|cerdo|costilla|hamburguesa/.test(n)) return '🥩';
+  if (/pan|harina|arepa|empanada|galleta/.test(n)) return '🍞';
+  if (/leche|yogurt|mantequilla|quesillo/.test(n)) return '🥛';
+  if (/arroz|pasta|espagueti|fideo/.test(n)) return '🍚';
+  if (/aceite|mayonesa|salsa|ketchup|mostaza/.test(n)) return '🫙';
+  if (/huevo/.test(n)) return '🥚';
+  if (/caf[eé]|t[eé]|az[uú]car|sal/.test(n)) return '☕';
+  if (/cerveza|polar|refresco|malta|jugo|agua|gaseosa/.test(n)) return '🥤';
+  if (/delivery|flete|env[ií]o/.test(n)) return '🛵';
+  if (/pago|transfer|m[oó]vil|comprobante/.test(n)) return '💳';
+  if (/consulta|\?|pregunt/.test(n)) return '❓';
+  return '🛒';
 }
 
-function kitchenLabel(s) {
-  return ({ nuevo: 'Nuevo', preparado: 'Preparado', atendido: 'Atendido', cancelado: 'Cancelado' })[s] || s;
+function prepLabel(i) {
+  if (i.prep) return i.prep;
+  if (i.detalle && i.detalle !== i.nombre) return i.detalle;
+  if (i.precio == null && i.nombre) return `${i.nombre} (pendiente)`;
+  const qty = i.cantidad != null
+    ? (/kilo/i.test(i.presentacion || '') ? `${i.cantidad} kg` : `${i.cantidad}×`)
+    : '';
+  const name = i.nombre || 'Ítem';
+  const pres = i.presentacion ? ` (${i.presentacion})` : '';
+  return `${qty ? `${qty} ` : ''}${name}${pres}`.trim();
 }
 
-function syncChatsPanel() {
-  $('chatsPanel').hidden = !state.chatsOpen;
-  document.querySelector('.app').classList.toggle('chats-open', state.chatsOpen);
-  $('btnToggleChats').textContent = state.chatsOpen ? 'Ocultar chats' : 'Chats';
-  localStorage.setItem('crmChatsOpen', state.chatsOpen ? '1' : '0');
-}
-
-async function loadNotes() {
-  const { notes } = await api('/api/notes');
-  state.notes = notes;
-  const count = $('noteCount');
-  count.textContent = String(notes.length);
-  count.classList.toggle('has', notes.length > 0);
-
-  const list = $('noteList');
-  if (!notes.length) {
-    list.innerHTML = '<p class="empty tiny">Sin notas pendientes.</p>';
-    if (state.noteId) {
-      state.noteId = null;
-      renderNoteDetail(null);
-    }
-    return;
+function noteItems(note) {
+  if (!note) return [];
+  if (note.motivo === 'pedido') {
+    // Preferir items decorados (con prep) o los del pedido guardado
+    const raw = (note.items?.length ? note.items : null)
+      || (note.order?.items?.length ? note.order.items : [])
+      || [];
+    return raw.map((i) => {
+      const label = prepLabel(i);
+      return {
+        nombre: i.nombre || label,
+        detalle: label,
+        label,
+        qty: i.cantidad,
+        presentacion: i.presentacion,
+        need: i.consulta || i.precio == null,
+        consulta: !!i.consulta,
+        noPrice: i.precio == null && !i.consulta,
+      };
+    });
   }
-
-  list.innerHTML = '';
-  for (const note of notes) {
-    list.appendChild(buildNoteRow(note));
+  if (note.motivo === 'pago') {
+    return [{ nombre: 'Comprobante de pago', detalle: 'Revisar captura', label: 'Comprobante de pago', need: true, pago: true }];
   }
-
-  if (state.noteId && !notes.some((n) => n.ticketId === state.noteId)) {
-    state.noteId = notes[0].ticketId;
+  if (note.motivo === 'flete') {
+    return [{ nombre: 'Flete / envío', detalle: note.note || 'Indicar tarifa', label: 'Flete / envío', need: true, flete: true }];
   }
-  if (!state.noteId) state.noteId = notes[0].ticketId;
-  if (state.noteId) await openNote(state.noteId, false);
+  const pending = note.pending?.length ? note.pending : (note.items || []);
+  if (!pending.length) {
+    return [{ nombre: 'Pesaje', detalle: 'Producto a pesar', label: 'Producto a pesar', need: true }];
+  }
+  return pending.map((i) => {
+    const label = prepLabel(i);
+    return {
+      nombre: i.nombre || label,
+      detalle: label,
+      label,
+      need: true,
+      consulta: !!i.consulta,
+    };
+  });
 }
 
-async function openNote(ticketId, refreshList = true) {
-  state.noteId = ticketId;
-  if (refreshList) {
-    for (const el of document.querySelectorAll('.note-row')) {
-      el.classList.toggle('active', el.querySelector('.note-num') && state.notes.find((n) => n.ticketId === ticketId && String(n.n) === el.querySelector('.note-num').textContent));
-    }
-    // simpler: reload list active state
-    await loadNotesListOnly();
+function ticketNum(note, index) {
+  if (note.motivo === 'pedido' && note.orderId) {
+    return String(note.orderId).padStart(2, '0').slice(-2);
   }
-  const data = await api(`/api/notes/${ticketId}`);
-  renderNoteDetail(data.note);
-  if (data.note?.phone) {
-    state.phone = data.note.phone;
-    if (state.chatsOpen) {
-      $('replyForm').hidden = false;
-      await loadMessages();
-      await loadChats();
-    }
-  }
+  if (note.n) return String(note.n).padStart(2, '0');
+  return String(index + 1).padStart(2, '0');
 }
 
-function buildNoteRow(note) {
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  const isPedido = note.motivo === 'pedido' || note.kind === 'pedido';
-  btn.className = `note-row${isPedido ? ' comanda' : ''}${note.ticketId === state.noteId ? ' active' : ''}`;
-  const ask = isPedido
-    ? (note.order?.address || note.items?.[0]?.detalle || `Pedido #${note.orderId}`)
-    : (note.pending?.[0]?.detalle || note.items?.[0]?.detalle || note.note || motivoLabel(note.motivo));
-  const badge = isPedido
-    ? kitchenLabel(note.kitchenStatus || note.estado)
-    : motivoLabel(note.motivo);
-  const num = isPedido ? `#${note.orderId}` : String(note.n);
-  btn.innerHTML =
-    `<span class="note-num">${escapeHtml(num)}</span>` +
-    `<div>` +
-    `<div class="title"><span>${escapeHtml(note.name || ('+' + note.phone))}</span>` +
-    `<span class="badge ${isPedido ? `k-${note.kitchenStatus || 'nuevo'}` : ''}">${escapeHtml(badge)}</span></div>` +
-    `<div class="preview">${escapeHtml(preview(ask))} · ${formatWhen(note.createdAt)}</div>` +
-    `</div>`;
-  btn.addEventListener('click', () => openNote(note.ticketId));
-  return btn;
+function ticketClass(note) {
+  if (note.motivo !== 'pedido') return 'caja-kind';
+  const s = note.kitchenStatus || 'nuevo';
+  if (s === 'atendido') return 'done';
+  if (s === 'cancelado') return 'canceled';
+  if (s === 'preparado') return 'opened';
+  return 'pending';
 }
 
-async function loadNotesListOnly() {
-  const list = $('noteList');
-  list.innerHTML = '';
-  for (const note of state.notes) list.appendChild(buildNoteRow(note));
-}
-
-function renderNoteDetail(note) {
-  if (!note) {
-    $('noteEmpty').hidden = false;
-    $('noteBody').hidden = true;
-    $('noteTitle').textContent = 'Seleccione una nota';
-    $('noteMeta').textContent = '';
-    return;
+function ticketTag(note) {
+  if (note.motivo === 'pedido') {
+    const s = note.kitchenStatus || 'nuevo';
+    return ({ nuevo: 'Pendiente', preparado: 'Abierta', atendido: 'Hecha', cancelado: 'Cancelada' })[s] || s;
   }
+  return ({ pesaje: 'Balanza', caja: 'Balanza', flete: 'Flete', pago: 'Pago' })[note.motivo] || 'Caja';
+}
 
-  const n = state.notes.find((x) => x.ticketId === note.ticketId)?.n;
-  $('noteEmpty').hidden = true;
-  $('noteBody').hidden = false;
-  $('noteTitle').textContent = `Nota ${n ?? ''} · ${motivoLabel(note.motivo)}`;
-  $('noteMeta').textContent = `${note.name || ''} · +${note.phone} · ${note.ticketId}`;
+function buildTicketHtml(note, index, { focus = false } = {}) {
+  const items = noteItems(note);
+  const num = ticketNum(note, index);
+  const who = note.name || `+${note.phone}`;
+  const cls = ['ticket', ticketClass(note)];
+  if (focus) cls.push('focus');
+  if (!focus && note.ticketId === state.selectedId) cls.push('selected');
 
-  $('reqText').textContent = note.note || `Atender ${motivoLabel(note.motivo).toLowerCase()} para el cliente.`;
-  const items = note.pending?.length ? note.pending : (note.items || []);
-  $('reqItems').innerHTML = items.length
-    ? items.map((i) => `<li>${escapeHtml(i.detalle || i.nombre || '')}</li>`).join('')
-    : '<li>Sin detalle de ítems</li>';
+  let stamp = '';
+  if (note.motivo === 'pedido' && note.kitchenStatus === 'atendido') stamp = '<div class="stamp">HECHO ✓</div>';
+  if (note.motivo === 'pedido' && note.kitchenStatus === 'cancelado') stamp = '<div class="stamp">CANCEL ✕</div>';
 
-  $('previewBox').textContent = note.previewMessage || 'Escriba el precio para ver el producto final.';
-  $('previewTotal').textContent = note.previewTotals
-    ? `Total estimado: $ ${Number(note.previewTotals.totalUsd).toFixed(2)}` +
-      (note.previewTotals.totalBs != null ? ` · Bs. ${Number(note.previewTotals.totalBs).toFixed(2)}` : '')
+  const rows = items.slice(0, focus ? 24 : 10).map((it) => {
+    const icon = itemIcon(it.nombre + ' ' + (it.detalle || ''));
+    const badge = it.need
+      ? (it.pago ? '💳' : it.flete ? '$' : '⏱')
+      : '';
+    const text = it.label || it.detalle || it.nombre || 'Ítem';
+    return `<div class="row${it.need ? ' need' : ''}" data-need="${it.need ? '1' : '0'}">
+      <span class="icon">${icon}</span>
+      <span class="label">${escapeHtml(text)}</span>
+      ${badge ? `<span class="badge">${badge}</span>` : ''}
+    </div>`;
+  }).join('');
+
+  const more = !focus && items.length > 10
+    ? `<div class="row"><span class="label">+${items.length - 10} más…</span></div>`
     : '';
 
-  const box = $('actionBlock');
-  box.innerHTML = '';
-  const hint = document.createElement('div');
-  hint.className = 'hint';
+  return `
+    <div class="hole"></div>
+    <div class="tag">${escapeHtml(ticketTag(note))}</div>
+    <div class="num-band"><div class="num">${escapeHtml(num)}</div></div>
+    <div class="who">${escapeHtml(who)}</div>
+    <div class="rows">${rows}${more}</div>
+    ${stamp}
+  `;
+}
 
-  if (note.motivo === 'pedido' || note.kind === 'pedido') {
-    hint.textContent = 'Comanda del pedido cerrado. Márquela según avance en cocina/despacho (el cliente recibe un aviso breve).';
-    box.append(hint);
+function sortRail(notes) {
+  const rank = (n) => {
+    if (n.motivo !== 'pedido') return 0;
+    const s = n.kitchenStatus || 'nuevo';
+    if (s === 'nuevo') return 1;
+    if (s === 'preparado') return 2;
+    if (s === 'atendido') return 3;
+    return 4;
+  };
+  return [...notes].sort((a, b) => {
+    const d = rank(a) - rank(b);
+    if (d) return d;
+    return (b.createdAt || 0) - (a.createdAt || 0);
+  });
+}
 
-    const track = document.createElement('div');
-    track.className = 'kitchen-track';
-    const steps = [
-      { id: 'nuevo', label: '🆕 Nuevo' },
-      { id: 'preparado', label: '🧺 Preparado' },
-      { id: 'atendido', label: '🛵 Atendido' },
-    ];
-    const current = note.kitchenStatus || 'nuevo';
-    const orderIdx = steps.findIndex((s) => s.id === current);
-    track.innerHTML = steps.map((s, i) => {
-      const done = i <= orderIdx;
-      const active = s.id === current;
-      return `<div class="k-step${done ? ' done' : ''}${active ? ' active' : ''}"><span>${s.label}</span></div>`;
-    }).join('<div class="k-line"></div>');
-    box.append(track);
+function updateStats() {
+  const wait = state.orders.filter((o) => (o.kitchenStatus || 'nuevo') === 'nuevo').length;
+  const open = state.orders.filter((o) => (o.kitchenStatus || 'nuevo') === 'preparado').length;
+  $('statWait').textContent = String(wait);
+  $('statOpen').textContent = String(open);
+  $('statCaja').textContent = String(state.caja.length);
+  $('statDone').textContent = String(state.doneRail.length);
+}
 
-    const row = document.createElement('div');
-    row.className = 'action-row';
+function fillRail(containerId, emptyId, notes) {
+  const rail = $(containerId);
+  const empty = $(emptyId);
+  rail.innerHTML = '';
+  if (!notes.length) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  notes.forEach((note, index) => {
+    const el = document.createElement('article');
+    el.className = ['ticket', ticketClass(note), note.ticketId === state.selectedId ? 'selected' : '']
+      .filter(Boolean).join(' ');
+    el.dataset.id = note.ticketId;
+    el.innerHTML = buildTicketHtml(note, index);
+    el.addEventListener('click', () => openTicket(note.ticketId));
+    rail.appendChild(el);
+  });
+}
 
-    const mk = (status, label, cls) => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = `btn ${cls}`;
-      b.textContent = label;
-      b.disabled = current === status || (status === 'preparado' && current === 'atendido');
-      b.addEventListener('click', async () => {
-        try {
-          const r = await api(`/api/notes/${note.ticketId}/kitchen`, {
-            method: 'POST',
-            body: JSON.stringify({ status, notifyCustomer: true }),
-          });
-          setStatus(`${kitchenLabel(status)} · pedido #${note.orderId}`);
-          if (r.message) $('previewBox').textContent = r.message;
-          await afterNoteAction(note.phone);
-        } catch (err) {
-          setStatus(err.message, false);
-        }
-      });
-      return b;
-    };
+function renderRail() {
+  fillRail('ticketRail', 'railEmpty', state.rail);
+  fillRail('doneRail', 'doneEmpty', state.doneRail);
+}
 
-    if (current === 'nuevo') row.append(mk('preparado', 'Marcar preparado', 'primary'));
-    if (current === 'nuevo' || current === 'preparado') row.append(mk('atendido', 'Marcar atendido', 'primary'));
-    row.append(mk('cancelado', 'Cancelar pedido', 'danger'));
+function allVisibleNotes() {
+  return [...state.rail, ...state.doneRail];
+}
 
-    const btnChat = document.createElement('button');
-    btnChat.type = 'button';
-    btnChat.className = 'btn ghost';
-    btnChat.textContent = 'Abrir chat';
-    btnChat.addEventListener('click', async () => {
-      state.chatsOpen = true;
-      syncChatsPanel();
-      state.phone = note.phone;
-      $('replyForm').hidden = false;
-      await Promise.all([loadChats(), loadMessages()]);
+async function loadAll() {
+  const [board, notes] = await Promise.all([
+    api('/api/orders/board'),
+    api('/api/notes'),
+  ]);
+  state.orders = board.orders || [];
+  state.caja = (notes.notes || []).filter((n) => n.motivo !== 'pedido');
+  const pedidos = state.orders;
+  const activos = pedidos.filter((n) => !isFinishedNote(n));
+  const hechos = pedidos.filter((n) => isFinishedNote(n));
+  state.rail = sortRail([...activos, ...state.caja]);
+  state.doneRail = sortRail(hechos);
+  updateStats();
+  renderRail();
+
+  if (state.selectedId) {
+    const still = allVisibleNotes().find((n) => n.ticketId === state.selectedId);
+    if (still) await openTicket(state.selectedId, false);
+    else showEmpty();
+  }
+}
+
+function showEmpty() {
+  state.selectedId = null;
+  state.detail = null;
+  state.phone = null;
+  $('bench').hidden = true;
+  $('benchEmpty').hidden = false;
+  renderRail();
+}
+
+async function openTicket(id, autoOpen = true) {
+  state.selectedId = id;
+  renderRail();
+  try {
+    const { note } = await api(`/api/notes/${id}`);
+    state.detail = note;
+    state.phone = note.phone;
+
+    // Pendiente → al tocarla se "abre" sola (preparado)
+    if (
+      autoOpen &&
+      note.motivo === 'pedido' &&
+      (note.kitchenStatus || 'nuevo') === 'nuevo'
+    ) {
+      try {
+        await api(`/api/notes/${note.ticketId}/kitchen`, {
+          method: 'POST',
+          body: JSON.stringify({ status: 'preparado', notifyCustomer: true }),
+        });
+        toast(`Comanda #${note.orderId} abierta`);
+        const refreshed = await api(`/api/notes/${id}`);
+        state.detail = refreshed.note;
+        await loadAllQuiet();
+      } catch {
+        // si falla, igual mostramos el detalle
+      }
+    }
+
+    renderBench(state.detail);
+    await loadMessages(state.detail.phone, {
+      sinceMs: state.detail.order?.createdAt || state.detail.createdAt || null,
+      ticketId: state.detail.ticketId,
     });
-    row.append(btnChat);
-    box.append(row);
+  } catch (err) {
+    toast(err.message);
+  }
+}
 
-    // Sin "Descartar" genérico que confunde con cancelar cocina — el track basta.
+async function loadAllQuiet() {
+  const [board, notes] = await Promise.all([
+    api('/api/orders/board'),
+    api('/api/notes'),
+  ]);
+  state.orders = board.orders || [];
+  state.caja = (notes.notes || []).filter((n) => n.motivo !== 'pedido');
+  const activos = state.orders.filter((n) => !isFinishedNote(n));
+  const hechos = state.orders.filter((n) => isFinishedNote(n));
+  state.rail = sortRail([...activos, ...state.caja]);
+  state.doneRail = sortRail(hechos);
+  updateStats();
+  renderRail();
+}
+
+function renderBench(note) {
+  $('benchEmpty').hidden = true;
+  $('bench').hidden = false;
+
+  const focus = $('focusTicket');
+  focus.className = `ticket focus ${ticketClass(note)}`;
+  focus.innerHTML = buildTicketHtml(note, 0, { focus: true });
+
+  const isPedido = note.motivo === 'pedido';
+  $('panelTitle').textContent = isPedido
+    ? `Pedido #${note.orderId}`
+    : ticketTag(note);
+  $('panelMeta').textContent = `${note.name || 'Cliente'} · +${note.phone} · ${formatWhen(note.createdAt)}`;
+
+  const addr = note.order?.address;
+  const addrEl = $('panelAddress');
+  if (addr) {
+    addrEl.hidden = false;
+    addrEl.textContent = /retiro/i.test(addr) ? addr : `📍 ${addr}`;
+  } else {
+    addrEl.hidden = true;
+  }
+
+  const tot = note.previewTotals || note.order;
+  $('panelTotal').textContent = tot && (tot.totalUsd != null || tot.totalBs != null)
+    ? money(tot.totalUsd ?? tot.total_usd, tot.totalBs ?? tot.total_bs)
+    : '';
+
+  renderPrepList(note);
+  $('chatTitle').textContent = isPedido
+    ? `💬 Chat · Pedido #${note.orderId}`
+    : `💬 Chat · ${ticketTag(note)}`;
+  $('chatMeta').textContent = `${note.name || 'Cliente'} · +${note.phone}`;
+
+  renderItemActions(note);
+  renderBigActions(note);
+}
+
+function renderPrepList(note) {
+  const list = $('prepList');
+  if (!list) return;
+  const items = noteItems(note);
+  if (!items.length) {
+    list.innerHTML = '<li class="meta">Sin productos en esta comanda.</li>';
+    return;
+  }
+  list.innerHTML = items.map((it) => {
+    const text = it.label || it.detalle || it.nombre;
+    return `<li>${itemIcon(text)} <strong>${escapeHtml(text)}</strong></li>`;
+  }).join('');
+}
+
+function renderItemActions(note) {
+  const box = $('itemActions');
+  box.innerHTML = '';
+
+  if (note.motivo === 'pedido') {
+    const needs = noteItems(note).filter((i) => i.need);
+    if (needs.length) {
+      const card = document.createElement('div');
+      card.className = 'need-card';
+      const names = needs.map((i) => i.nombre).join(', ');
+      card.innerHTML =
+        `<strong>⏱ Atención: ${escapeHtml(names)}</strong>` +
+        `<span style="flex-basis:100%;font-size:0.9rem">Fila amarilla = falta precio o es una consulta. Responda al cliente abajo 💬</span>`;
+      box.append(card);
+    }
     return;
   }
 
   if (note.motivo === 'pesaje' || note.motivo === 'caja') {
-    hint.textContent = 'Pese en balanza e indique el monto total en USD. Abajo verá el mensaje final al cliente.';
-    box.append(hint);
-    const row = document.createElement('div');
-    row.className = 'action-row';
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.min = '0.01';
-    input.step = '0.01';
-    input.placeholder = 'USD';
-    input.addEventListener('input', () => debouncePreview(note.ticketId, input.value));
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn primary';
-    btn.textContent = 'Enviar precio';
-    btn.addEventListener('click', async () => {
-      try {
-        const r = await api(`/api/notes/${note.ticketId}/precio`, { method: 'POST', body: JSON.stringify({ usd: input.value }) });
-        setStatus('Precio enviado al cliente');
-        $('previewBox').textContent = r.message || 'Enviado';
-        await afterNoteAction(note.phone);
-      } catch (err) {
-        setStatus(err.message, false);
-      }
-    });
-    const btnNo = document.createElement('button');
-    btnNo.type = 'button';
-    btnNo.className = 'btn danger';
-    btnNo.textContent = 'Sin stock';
-    btnNo.addEventListener('click', async () => {
-      try {
-        const r = await api(`/api/notes/${note.ticketId}/nohay`, { method: 'POST', body: '{}' });
-        setStatus('Cliente notificado: sin stock');
-        $('previewBox').textContent = r.message || 'Enviado';
-        await afterNoteAction(note.phone);
-      } catch (err) {
-        setStatus(err.message, false);
-      }
-    });
-    row.append(input, btn, btnNo);
-    box.append(row);
-  } else if (note.motivo === 'flete') {
-    hint.textContent = 'Indique la tarifa de envío en USD para esa zona.';
-    box.append(hint);
-    const row = document.createElement('div');
-    row.className = 'action-row';
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.min = '0.01';
-    input.step = '0.01';
-    input.placeholder = 'Flete USD';
-    input.addEventListener('input', () => debouncePreview(note.ticketId, input.value));
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn primary';
-    btn.textContent = 'Confirmar flete';
-    btn.addEventListener('click', async () => {
-      try {
-        const r = await api(`/api/notes/${note.ticketId}/flete`, { method: 'POST', body: JSON.stringify({ usd: input.value }) });
-        setStatus('Flete enviado');
-        $('previewBox').textContent = r.message || 'Enviado';
-        await afterNoteAction(note.phone);
-      } catch (err) {
-        setStatus(err.message, false);
-      }
-    });
-    row.append(input, btn);
-    box.append(row);
-  } else if (note.motivo === 'pago') {
-    hint.textContent = 'Revise el capture en el chat de WhatsApp y confirme o rechace el pago.';
-    box.append(hint);
-    const row = document.createElement('div');
-    row.className = 'action-row';
-    const btnOk = document.createElement('button');
-    btnOk.type = 'button';
-    btnOk.className = 'btn primary';
-    btnOk.textContent = 'Pago OK · despachar';
-    btnOk.addEventListener('click', async () => {
-      try {
-        const r = await api(`/api/notes/${note.ticketId}/pago`, { method: 'POST', body: JSON.stringify({ ok: true }) });
-        setStatus('Pago confirmado al cliente');
-        $('previewBox').textContent = r.message || 'Enviado';
-        await afterNoteAction(note.phone);
-      } catch (err) {
-        setStatus(err.message, false);
-      }
-    });
-    const btnNo = document.createElement('button');
-    btnNo.type = 'button';
-    btnNo.className = 'btn danger';
-    btnNo.textContent = 'Rechazar capture';
-    btnNo.addEventListener('click', async () => {
-      try {
-        const r = await api(`/api/notes/${note.ticketId}/pago`, { method: 'POST', body: JSON.stringify({ ok: false }) });
-        setStatus('Se pidió nuevo comprobante');
-        $('previewBox').textContent = r.message || 'Enviado';
-        await afterNoteAction(note.phone);
-      } catch (err) {
-        setStatus(err.message, false);
-      }
-    });
-    const btnChat = document.createElement('button');
-    btnChat.type = 'button';
-    btnChat.className = 'btn ghost';
-    btnChat.textContent = 'Ver chat / capture';
-    btnChat.addEventListener('click', async () => {
-      state.chatsOpen = true;
-      syncChatsPanel();
-      state.phone = note.phone;
-      $('replyForm').hidden = false;
-      await Promise.all([loadChats(), loadMessages()]);
-    });
-    row.append(btnOk, btnNo, btnChat);
-    box.append(row);
-  } else {
-    hint.textContent = 'Nota general: puede cerrarla cuando esté resuelta.';
-    box.append(hint);
-  }
-
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'btn ghost';
-  dismiss.textContent = 'Descartar nota';
-  dismiss.style.marginTop = '0.55rem';
-  dismiss.addEventListener('click', async () => {
-    try {
-      await api(`/api/notes/${note.ticketId}/dismiss`, { method: 'POST', body: '{}' });
-      setStatus('Nota cerrada');
-      await afterNoteAction(note.phone);
-    } catch (err) {
-      setStatus(err.message, false);
+    const items = noteItems(note);
+    for (const it of items) {
+      const card = document.createElement('div');
+      card.className = 'need-card';
+      card.innerHTML = `<strong>${itemIcon(it.nombre)} ${escapeHtml(it.nombre)}</strong>`;
+      const btnPrice = document.createElement('button');
+      btnPrice.type = 'button';
+      btnPrice.className = 'btn-price';
+      btnPrice.textContent = '💰 Poner precio';
+      btnPrice.addEventListener('click', () => askPrice(note, 'precio', it.nombre));
+      const btnNo = document.createElement('button');
+      btnNo.type = 'button';
+      btnNo.className = 'btn-no';
+      btnNo.textContent = '🚫 No hay';
+      btnNo.addEventListener('click', () => markNoHay(note));
+      card.append(btnPrice, btnNo);
+      box.append(card);
     }
-  });
-  box.append(dismiss);
-}
-
-let previewTimer = null;
-function debouncePreview(ticketId, usd) {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(async () => {
-    try {
-      const data = await api(`/api/notes/${ticketId}?usd=${encodeURIComponent(usd || '')}`);
-      $('previewBox').textContent = data.note.previewMessage || '—';
-      $('previewTotal').textContent = data.note.previewTotals
-        ? `Total estimado: $ ${Number(data.note.previewTotals.totalUsd).toFixed(2)}` +
-          (data.note.previewTotals.totalBs != null ? ` · Bs. ${Number(data.note.previewTotals.totalBs).toFixed(2)}` : '')
-        : '';
-    } catch {
-      // ignore while typing
-    }
-  }, 280);
-}
-
-async function afterNoteAction(phone) {
-  await loadNotes();
-  if (state.chatsOpen && phone) {
-    state.phone = phone;
-    await Promise.all([loadChats(), loadMessages()]);
-  }
-}
-
-function needsAttention(chat) {
-  return chat.lastRole === 'user' && !chat.paused;
-}
-
-async function loadChats() {
-  const { chats } = await api('/api/chats');
-  state.chats = chats;
-  const list = $('chatList');
-  if (!chats.length) {
-    list.innerHTML = '<p class="empty tiny">Sin chats aún.</p>';
     return;
   }
-  list.innerHTML = '';
-  for (const chat of chats) {
+
+  if (note.motivo === 'flete') {
+    const card = document.createElement('div');
+    card.className = 'need-card';
+    card.innerHTML = '<strong>🛵 ¿Cuánto cuesta el envío?</strong>';
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `row${chat.phone === state.phone ? ' active' : ''}`;
-    const label = chat.name || `+${chat.phone}`;
-    const attention = needsAttention(chat);
-    btn.innerHTML =
-      `<div class="title"><span>${attention ? '• ' : ''}${escapeHtml(label)}` +
-      `${chat.paused ? ' <span class="badge">pausado</span>' : ''}</span>` +
-      `<span class="when">${formatWhen(chat.lastAt)}</span></div>` +
-      `<div class="preview">${escapeHtml(preview(chat.lastContent))}</div>`;
-    btn.addEventListener('click', async () => {
-      state.phone = chat.phone;
-      $('replyForm').hidden = false;
-      await Promise.all([loadChats(), loadMessages()]);
+    btn.className = 'btn-price';
+    btn.textContent = '💰 Poner flete';
+    btn.addEventListener('click', () => askPrice(note, 'flete', 'Flete'));
+    card.append(btn);
+    box.append(card);
+    return;
+  }
+
+  if (note.motivo === 'pago') {
+    const card = document.createElement('div');
+    card.className = 'need-card';
+    card.innerHTML = '<strong>💳 ¿El pago está bien?</strong>';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn-price';
+    ok.textContent = 'Sí, pago OK ✅';
+    ok.addEventListener('click', async () => {
+      try {
+        await api(`/api/notes/${note.ticketId}/pago`, { method: 'POST', body: JSON.stringify({ ok: true }) });
+        toast('Pago confirmado');
+        await afterResolve(note.ticketId);
+      } catch (err) {
+        toast(err.message);
+      }
     });
-    list.appendChild(btn);
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'btn-no';
+    no.textContent = 'Rechazar ❌';
+    no.addEventListener('click', async () => {
+      try {
+        await api(`/api/notes/${note.ticketId}/pago`, { method: 'POST', body: JSON.stringify({ ok: false }) });
+        toast('Capture rechazado');
+        await afterResolve(note.ticketId);
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+    card.append(ok, no);
+    box.append(card);
   }
 }
 
-async function loadMessages() {
-  if (!state.phone) return;
-  const data = await api(`/api/chats/${state.phone}/messages`);
-  $('threadName').textContent = data.name || `+${data.phone}`;
-  $('threadMeta').textContent = `+${data.phone}${data.paused ? ' · pausada' : ''}`;
+function renderBigActions(note) {
+  const box = $('bigActions');
+  box.innerHTML = '';
+  if (note.motivo !== 'pedido') return;
+
+  const status = note.kitchenStatus || 'nuevo';
+
+  if (status === 'nuevo') {
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'btn-open';
+    open.textContent = '👀 Abrir comanda';
+    open.addEventListener('click', () => setKitchen(note, 'preparado'));
+    box.append(open);
+  }
+
+  if (status === 'nuevo' || status === 'preparado') {
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.className = 'btn-done';
+    done.textContent = '✅ Ya está hecho';
+    done.addEventListener('click', () => setKitchen(note, 'atendido'));
+
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn-cancel';
+    cancel.textContent = '❌ Cancelar';
+    cancel.addEventListener('click', () => {
+      if (confirm('¿Cancelar este pedido? El cliente recibirá un aviso.')) {
+        setKitchen(note, 'cancelado');
+      }
+    });
+    box.append(done, cancel);
+  }
+
+  if (status === 'atendido' || status === 'cancelado' || note.order?.status === 'cancelado') {
+    const reopen = document.createElement('button');
+    reopen.type = 'button';
+    reopen.className = 'btn-reopen';
+    reopen.textContent = '↩ Volver a cocina';
+    reopen.addEventListener('click', () => setKitchen(note, 'preparado'));
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn-cancel';
+    del.textContent = '🗑️ Borrar';
+    del.addEventListener('click', () => deleteFinished(note));
+    box.append(reopen, del);
+  }
+}
+
+async function deleteFinished(note) {
+  if (!confirm('¿Borrar este pedido? Ya no aparecerá en el tablero.')) return;
+  try {
+    await api(`/api/notes/${note.ticketId}/delete`, { method: 'POST', body: '{}' });
+    toast(`Pedido #${note.orderId} borrado`);
+    state.selectedId = null;
+    await loadAll();
+    const next = state.rail[0] || state.doneRail[0];
+    if (next) await openTicket(next.ticketId, false);
+    else showEmpty();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function setKitchen(note, status) {
+  try {
+    await api(`/api/notes/${note.ticketId}/kitchen`, {
+      method: 'POST',
+      body: JSON.stringify({ status, notifyCustomer: true }),
+    });
+    const labels = { preparado: 'Abierta', atendido: '¡Hecho!', cancelado: 'Cancelado', nuevo: 'Pendiente' };
+    toast(`Pedido #${note.orderId}: ${labels[status] || status}`);
+    await loadAll();
+    if (allVisibleNotes().some((n) => n.ticketId === note.ticketId)) {
+      await openTicket(note.ticketId, false);
+    } else if (state.rail[0]) {
+      await openTicket(state.rail[0].ticketId, false);
+    } else if (state.doneRail[0]) {
+      await openTicket(state.doneRail[0].ticketId, false);
+    } else {
+      showEmpty();
+    }
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function askPrice(note, kind, label) {
+  state.pendingPriceNote = { note, kind };
+  $('priceTitle').textContent = kind === 'flete' ? '¿Cuánto cuesta el envío?' : '¿Cuánto cuesta?';
+  $('priceHint').textContent = label ? `Precio en dólares · ${label}` : 'Escriba el precio en dólares';
+  $('priceInput').value = '';
+  $('priceDialog').showModal();
+  setTimeout(() => $('priceInput').focus(), 50);
+}
+
+$('priceDialog').addEventListener('close', async () => {
+  if ($('priceDialog').returnValue !== 'ok') {
+    state.pendingPriceNote = null;
+    return;
+  }
+  const pending = state.pendingPriceNote;
+  state.pendingPriceNote = null;
+  if (!pending) return;
+  const usd = $('priceInput').value;
+  try {
+    const path = pending.kind === 'flete' ? 'flete' : 'precio';
+    await api(`/api/notes/${pending.note.ticketId}/${path}`, {
+      method: 'POST',
+      body: JSON.stringify({ usd }),
+    });
+    toast('Precio enviado al cliente');
+    await afterResolve(pending.note.ticketId);
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+$('priceOk').addEventListener('click', (e) => {
+  const v = Number(String($('priceInput').value).replace(',', '.'));
+  if (!(v > 0)) {
+    e.preventDefault();
+    toast('Escriba un precio mayor que cero');
+  }
+});
+
+async function markNoHay(note) {
+  if (!confirm('¿Marcar como que no hay? Se avisará al cliente.')) return;
+  try {
+    await api(`/api/notes/${note.ticketId}/nohay`, { method: 'POST', body: '{}' });
+    toast('Avisado: no hay');
+    await afterResolve(note.ticketId);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function afterResolve(ticketId) {
+  await loadAll();
+  if (allVisibleNotes().some((n) => n.ticketId === ticketId)) {
+    await openTicket(ticketId, false);
+  } else if (state.rail[0]) {
+    await openTicket(state.rail[0].ticketId, false);
+  } else if (state.doneRail[0]) {
+    await openTicket(state.doneRail[0].ticketId, false);
+  } else {
+    showEmpty();
+  }
+}
+
+let messagesSeq = 0;
+
+function cleanChatText(content) {
+  return String(content || '')
+    .replace(/\[PEDIDO_CANCELADO\]/g, '')
+    .replace(/\[sin respuesta\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function loadMessages(phone, { sinceMs = null, ticketId = null } = {}) {
+  if (!phone) return;
+  const seq = ++messagesSeq;
+  const expectedTicket = ticketId || state.selectedId;
+  const data = await api(`/api/chats/${phone}/messages`);
+  // Evitar que una respuesta vieja pinte el chat de otro pedido.
+  if (seq !== messagesSeq) return;
+  if (state.phone && state.phone !== phone) return;
+  if (expectedTicket && state.selectedId && expectedTicket !== state.selectedId) return;
+
   const box = $('messages');
   box.innerHTML = '';
-  for (const m of data.messages) {
+
+  // API ya viene cronológico (viejo → nuevo).
+  let msgs = Array.isArray(data.messages) ? data.messages.slice() : [];
+
+  // Cortar desde el último pedido cancelado (este chat = este pedido).
+  let start = 0;
+  for (let i = 0; i < msgs.length; i += 1) {
+    if (msgs[i].role === 'model' && /\[PEDIDO_CANCELADO\]/.test(msgs[i].content || '')) {
+      start = i + 1;
+    }
+  }
+  msgs = msgs.slice(start);
+
+  if (sinceMs) {
+    const fromOrder = msgs.filter((m) => Number(m.created_at || 0) >= Number(sinceMs) - 60_000);
+    if (fromOrder.length) msgs = fromOrder;
+  }
+
+  msgs = msgs.filter((m) => cleanChatText(m.content));
+
+  if (!msgs.length) {
+    box.innerHTML = '<p class="meta">Sin mensajes de este pedido aún.</p>';
+    return;
+  }
+
+  for (const m of msgs) {
+    const text = cleanChatText(m.content);
     const div = document.createElement('div');
-    div.className = `bubble ${m.role === 'user' ? 'user' : 'model'}`;
-    // Capture / adjunto: resaltar
-    const isCapture = /adjunt[oó]|imagen|documento|comprobante|capture|captura/i.test(m.content);
-    div.innerHTML = `${isCapture ? '🧾 ' : ''}${escapeHtml(m.content)}<span class="when">${formatWhen(m.created_at)}</span>`;
+    const capture = /adjunt|imagen|documento|comprobante|capture|captura/i.test(text);
+    div.className = `bubble ${m.role === 'user' ? 'in' : 'out'}`;
+    div.textContent = `${capture ? '🧾 ' : ''}${text}`;
     box.appendChild(div);
   }
   box.scrollTop = box.scrollHeight;
 }
 
-async function loadOrders() {
-  const { orders } = await api('/api/orders/today');
-  const list = $('orderList');
-  if (!orders.length) {
-    list.innerHTML = '<p class="empty">No hay pedidos hoy.</p>';
-    return;
-  }
-  list.innerHTML = '';
-  for (const o of orders) {
-    const el = document.createElement('div');
-    el.className = 'order';
-    const items = (o.items || []).map((i) => `<li>${escapeHtml(i.detalle || `${i.cantidad}× ${i.nombre}`)}</li>`).join('');
-    const total = o.totalBs != null ? `Bs. ${Number(o.totalBs).toFixed(2)}`
-      : (o.totalUsd != null ? `$ ${Number(o.totalUsd).toFixed(2)}` : o.status);
-    el.innerHTML =
-      `<strong>#${o.id} · ${escapeHtml(o.name || ('+' + o.phone))}</strong>` +
-      `<div class="sub">${escapeHtml(o.status)} · ${escapeHtml(total)}</div>` +
-      `<ul>${items}</ul>`;
-    el.addEventListener('click', async () => {
-      $('ordersDialog').close();
-      state.chatsOpen = true;
-      syncChatsPanel();
-      state.phone = o.phone;
-      $('replyForm').hidden = false;
-      await Promise.all([loadChats(), loadMessages()]);
-    });
-    list.appendChild(el);
-  }
-}
-
 function connectEvents() {
-  if (state.es) {
-    state.es.close();
-    state.es = null;
-  }
+  if (state.es) state.es.close();
   state.es = new EventSource(apiUrl('/api/events'));
   state.es.onmessage = async (ev) => {
     try {
       const data = JSON.parse(ev.data);
       if (data.type === 'hello') return;
-      await loadNotes();
-      if (state.chatsOpen) {
-        await loadChats();
-        if (data.phone && data.phone === state.phone) await loadMessages();
+      await loadAll();
+      if (state.phone && state.detail && (data.phone === state.phone || data.alert?.phone === state.phone)) {
+        await loadMessages(state.phone, {
+          sinceMs: state.detail.order?.createdAt || state.detail.createdAt || null,
+          ticketId: state.detail.ticketId,
+        });
       }
     } catch {
       // ignore
     }
   };
-  state.es.onerror = () => setStatus('Reconectando…', false);
+  state.es.onerror = () => toast('Reconectando…', 1500);
 }
 
-$('btnOrders').addEventListener('click', async () => {
-  try {
-    await loadOrders();
-    $('ordersDialog').showModal();
-  } catch (err) {
-    setStatus(err.message, false);
-  }
-});
-
-$('btnToggleChats').addEventListener('click', async () => {
-  state.chatsOpen = !state.chatsOpen;
-  syncChatsPanel();
-  if (state.chatsOpen) {
-    try {
-      await loadChats();
-      if (state.phone) {
-        $('replyForm').hidden = false;
-        await loadMessages();
-      }
-    } catch (err) {
-      setStatus(err.message, false);
-    }
-  }
-});
-
-$('btnRefresh').addEventListener('click', async () => {
-  try {
-    await loadNotes();
-    if (state.chatsOpen) {
-      await loadChats();
-      if (state.phone) await loadMessages();
-    }
-    setStatus(`${state.notes.length} nota(s)`);
-  } catch (err) {
-    setStatus(err.message, false);
-  }
+$('btnRefresh').addEventListener('click', () => {
+  loadAll().then(() => toast('Actualizado')).catch((e) => toast(e.message));
 });
 
 $('replyForm').addEventListener('submit', async (e) => {
@@ -570,11 +736,13 @@ $('replyForm').addEventListener('submit', async (e) => {
   try {
     await api(`/api/chats/${state.phone}/reply`, { method: 'POST', body: JSON.stringify({ text }) });
     $('replyText').value = '';
-    await loadMessages();
-    await loadChats();
-    setStatus('Enviado · Bárbara pausada 5 min');
+    await loadMessages(state.phone, {
+      sinceMs: state.detail?.order?.createdAt || state.detail?.createdAt || null,
+      ticketId: state.selectedId,
+    });
+    toast('Mensaje enviado');
   } catch (err) {
-    setStatus(err.message, false);
+    toast(err.message);
   } finally {
     btn.disabled = false;
   }
@@ -589,16 +757,14 @@ $('replyForm').addEventListener('submit', async (e) => {
         localStorage.setItem('crmToken', state.token);
       }
     } else if (!state.token) {
-      setStatus('Abra el panel en esta misma PC: http://127.0.0.1:3847', false);
+      toast('Abra http://127.0.0.1:3847 en esta PC');
       return;
     }
-    syncChatsPanel();
-    await loadNotes();
-    if (state.chatsOpen) await loadChats();
+    await loadAll();
     connectEvents();
-    setStatus(`${state.notes.length} nota(s) · listo`);
   } catch (err) {
-    setStatus(err.message, false);
-    $('noteList').innerHTML = `<p class="empty error">${escapeHtml(err.message)}<br><br>Reinicie Bárbara y abra http://127.0.0.1:3847</p>`;
+    toast(err.message);
+    $('railEmpty').hidden = false;
+    $('railEmpty').textContent = `${err.message} — Reinicie Bárbara y abra http://127.0.0.1:3847`;
   }
 })();

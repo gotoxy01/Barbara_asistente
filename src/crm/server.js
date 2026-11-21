@@ -11,6 +11,8 @@ import { recordAdvisorMessage } from '../services/chatService.js';
 import {
   getNoteById,
   listNotes,
+  listOrderNotes,
+  noteDeleteFinished,
   noteDismiss,
   noteKitchenStatus,
   noteNoStock,
@@ -122,6 +124,15 @@ function createApp() {
     }
   });
 
+  // Pedidos de las últimas 24 h (tablero principal).
+  app.get('/api/orders/board', async (_req, res) => {
+    try {
+      res.json({ orders: await listOrderNotes() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/notes/:ticketId', async (req, res) => {
     const previewUsd = req.query.usd != null ? Number(String(req.query.usd).replace(',', '.')) : null;
     const note = await getNoteById(req.params.ticketId, { previewUsd });
@@ -190,6 +201,16 @@ function createApp() {
     const result = await noteDismiss(req.params.ticketId);
     if (result.error) return res.status(400).json({ error: result.error });
     return res.json(result);
+  });
+
+  app.post('/api/notes/:ticketId/delete', async (req, res) => {
+    try {
+      const result = await noteDeleteFinished(req.params.ticketId);
+      if (result.error) return res.status(400).json({ error: result.error });
+      return res.json(result);
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
   });
 
   app.post('/api/caja/:phone/precio', async (req, res) => {

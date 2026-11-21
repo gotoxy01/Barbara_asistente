@@ -12,6 +12,7 @@ import {
 } from './orderService.js';
 import {
   clearEditingTicket,
+  closeTicketsForPhone,
   getTicket,
   listOpenTickets,
   updateTicket,
@@ -31,7 +32,16 @@ export async function decorateNote(ticket, { previewUsd = null } = {}) {
   const bcv = await getBcvRate();
   const order = db.getActiveOrder(ticket.clienteTelefono);
   const items = order?.items || [];
-  const pending = pendingWeighItems(items);
+  // Siempre el pendiente REAL del carrito actual de ESE teléfono (no ítems viejos guardados en la nota).
+  let pending = pendingWeighItems(items);
+  if (ticket.items?.length && pending.length) {
+    const keys = ticket.items.map((i) => String(i.detalle || i.nombre || '').toLowerCase()).filter(Boolean);
+    const matched = pending.filter((p) => {
+      const d = String(p.detalle || p.nombre || '').toLowerCase();
+      return keys.some((k) => d.includes(k) || k.includes(d));
+    });
+    if (matched.length) pending = matched;
+  }
   const totals = items.length ? computeTotals(items, bcv) : null;
 
   let previewMessage = null;
@@ -122,7 +132,7 @@ export async function decorateKitchenNote(order) {
   const bcv = await getBcvRate();
   const name = db.getChat(order.phone)?.name || null;
   const boleta = order.items?.length ? renderBoleta(order.items, bcv) : '';
-  const kitchen = order.kitchen_status || 'nuevo';
+  const kitchen = kitchenOf(order);
   return {
     kind: 'pedido',
     ticketId: `P-${order.id}`,
@@ -135,7 +145,12 @@ export async function decorateKitchenNote(order) {
     items: (order.items || []).map((i) => ({
       nombre: i.nombre,
       detalle: itemLine(i),
+      cantidad: i.cantidad,
+      presentacion: i.presentacion,
+      precio: i.precio,
       consulta: !!i.consulta,
+      // Texto listo para cocina/despacho
+      prep: itemLine(i),
     })),
     pending: [],
     order: {
@@ -146,6 +161,7 @@ export async function decorateKitchenNote(order) {
       totalUsd: order.total_usd,
       totalBs: order.total_bs,
       kitchenStatus: kitchen,
+      createdAt: order.created_at || order.updated_at,
     },
     totals: order.items?.length ? (() => {
       const t = computeTotals(order.items, bcv);
@@ -166,28 +182,87 @@ function kitchenLabel(s) {
   return ({ nuevo: '🆕 Nuevo', preparado: '🧺 Preparado', atendido: '🛵 Atendido', cancelado: '❌ Cancelado' })[s] || s;
 }
 
+/** Normaliza estado de cocina también si el pedido ya está cancelado a nivel status. */
+function kitchenOf(order) {
+  if (order.status === 'cancelado') return 'cancelado';
+  return order.kitchen_status || 'nuevo';
+}
+
+const NOTE_WINDOW_MS = 24 * 3600 * 1000;
+
+/** Cierra notas duplicadas del mismo chat+motivo (deja la más reciente). */
+function dedupeOpenTickets(tickets) {
+  const best = new Map();
+  const drop = [];
+  for (const t of tickets) {
+    const phone = String(t.clienteTelefono || '').replace(/\D/g, '');
+    const key = `${phone}::${t.motivo || 'pesaje'}`;
+    const prev = best.get(key);
+    if (!prev) {
+      best.set(key, t);
+      continue;
+    }
+    if ((t.createdAt || 0) > (prev.createdAt || 0)) {
+      drop.push(prev);
+      best.set(key, t);
+    } else {
+      drop.push(t);
+    }
+  }
+  for (const t of drop) updateTicket(t.ticketId, { estado: 'CERRADO' });
+  return [...best.values()];
+}
+
 export async function listNotes() {
-  const tickets = listOpenTickets(60);
-  const kitchen = db.listKitchenOrders(40);
+  const since = Date.now() - NOTE_WINDOW_MS;
+  // Solo tickets de las últimas 24 h (nada viejo saturando el bloc).
+  let tickets = dedupeOpenTickets(
+    listOpenTickets(60).filter((t) => (t.createdAt || 0) >= since),
+  );
+  // Cierra notas de pesaje huérfanas (carrito ya no tiene pendientes = pedido viejo/cancelado).
+  tickets = tickets.filter((t) => {
+    if (!['pesaje', 'caja'].includes(t.motivo || '')) return true;
+    const order = db.getActiveOrder(t.clienteTelefono);
+    const pending = order ? pendingWeighItems(order.items) : [];
+    if (pending.length) return true;
+    updateTicket(t.ticketId, { estado: 'CERRADO' });
+    return false;
+  });
+  const kitchen = db.listKitchenOrders(40, 24);
 
   const ticketNotes = [];
-  for (const t of tickets) ticketNotes.push(await decorateNote(t));
+  for (const t of tickets) {
+    // Solo ítems/pedido de ESE teléfono: nunca mezclar chats.
+    const note = await decorateNote(t);
+    if (note.phone && t.clienteTelefono && String(note.phone).replace(/\D/g, '') !== String(t.clienteTelefono).replace(/\D/g, '')) {
+      continue;
+    }
+    ticketNotes.push(note);
+  }
   const orderNotes = [];
   for (const o of kitchen) orderNotes.push(await decorateKitchenNote(o));
 
-  // Una sola cola numerada: cajas urgentes y comandas, por llegada.
-  const merged = [...ticketNotes, ...orderNotes].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  // Más recientes primero; números 1…n
+  const merged = [...ticketNotes, ...orderNotes].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   return merged.map((note, i) => ({ n: i + 1, ...note }));
+}
+
+/** Pedidos recibidos/cancelados visibles (últimas 24 h) para el tablero principal. */
+export async function listOrderNotes() {
+  const orders = db.listOrdersLastHours(24, 50)
+    .filter((o) => !o.board_hidden)
+    .filter((o) => o.status === 'recibido' || o.status === 'cancelado' || o.kitchen_status === 'cancelado');
+  const notes = [];
+  for (const o of orders) notes.push(await decorateKitchenNote(o));
+  return notes.map((note, i) => ({ n: i + 1, ...note }));
 }
 
 export async function getNoteById(id, { previewUsd = null } = {}) {
   if (String(id).startsWith('P-')) {
     const orderId = Number(String(id).slice(2));
     const order = db.getOrderById(orderId);
-    if (!order || order.status !== 'recibido') return null;
-    if (!['nuevo', 'preparado'].includes(order.kitchen_status || 'nuevo') && previewUsd == null) {
-      // Permitir ver recién cambiados; si ya salió del tablero, igual devolver si existe.
-    }
+    if (!order || order.board_hidden) return null;
+    if (!['recibido', 'cancelado'].includes(order.status)) return null;
     return decorateKitchenNote(order);
   }
   const ticket = getTicket(id);
@@ -206,10 +281,19 @@ export async function noteKitchenStatus(noteId, status, { notifyCustomer = true 
   if (!allowed.has(status)) return { error: 'Estado inválido' };
 
   const before = db.getOrderById(orderId);
-  if (!before || before.status !== 'recibido') return { error: 'Pedido no encontrado' };
+  if (!before) return { error: 'Pedido no encontrado' };
+  if (!['recibido', 'cancelado'].includes(before.status)) return { error: 'Pedido no encontrado' };
+  if (before.board_hidden) return { error: 'Este pedido ya fue borrado del tablero' };
 
   const order = db.setKitchenStatus(orderId, status);
   if (!order) return { error: 'No se pudo actualizar' };
+
+  if (status === 'cancelado') {
+    closeTicketsForPhone(order.phone);
+    // No dejar carritos abiertos/pesajes viejos colgados en el mismo chat.
+    db.clearActiveCarts(order.phone);
+    db.startFreshActiveOrder(order.phone);
+  }
 
   let message = null;
   if (notifyCustomer) {
@@ -218,16 +302,23 @@ export async function noteKitchenStatus(noteId, status, { notifyCustomer = true 
     } else if (status === 'atendido') {
       message = `Su pedido *#${order.id}* ya fue atendido y va en camino / listo para entrega. ¡Gracias por preferir *Abasto Los Cuchos*! 🛵🙏`;
     } else if (status === 'cancelado') {
-      message = `Su pedido *#${order.id}* fue cancelado. Disculpe las molestias. Si desea armar otro, escríbanos por aquí. 🙏`;
+      message = `Su pedido *#${order.id}* fue cancelado. Disculpe las molestias. Si desea armar otro, escríbanos por aquí. 🙏\n[PEDIDO_CANCELADO]`;
     }
     if (message) {
       try {
-        await sendMessage(order.phone, message);
+        const forCustomer = message.replace(/\[PEDIDO_CANCELADO\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+        await sendMessage(order.phone, forCustomer);
         db.addMessage(order.phone, 'model', message);
       } catch (err) {
         return { ok: true, order, warning: `Estado guardado, pero no se pudo avisar al cliente: ${err.message}` };
       }
     }
+  } else if (status === 'cancelado') {
+    db.addMessage(
+      order.phone,
+      'model',
+      `Pedido #${order.id} cancelado desde el negocio.\n[PEDIDO_CANCELADO]`,
+    );
   }
 
   if (status === 'atendido' || status === 'cancelado') {
@@ -235,6 +326,31 @@ export async function noteKitchenStatus(noteId, status, { notifyCustomer = true 
   }
   publishCrm({ type: 'note_done', ticketId: noteId, phone: order.phone, kitchenStatus: status });
   return { ok: true, order, message, kitchenStatus: status };
+}
+
+/** Quita del tablero un pedido ya realizado o cancelado (el chat no se borra). */
+export async function noteDeleteFinished(noteId) {
+  if (!String(noteId).startsWith('P-')) return { error: 'Solo se pueden borrar comandas de pedido (P-…)' };
+  const orderId = Number(String(noteId).slice(2));
+  const before = db.getOrderById(orderId);
+  if (!before) return { error: 'Pedido no encontrado' };
+  const done = before.kitchen_status === 'atendido'
+    || before.kitchen_status === 'cancelado'
+    || before.status === 'cancelado';
+  if (!done) {
+    return { error: 'Solo se pueden borrar pedidos ya realizados o cancelados' };
+  }
+  const order = db.hideFinishedOrderFromBoard(orderId);
+  if (!order) return { error: 'No se pudo borrar del tablero' };
+  closeTicketsForPhone(order.phone);
+  db.resolveAlertsByPhoneKind(order.phone, 'order');
+  publishCrm({ type: 'note_deleted', ticketId: noteId, phone: order.phone });
+  return { ok: true, order };
+}
+
+/** @deprecated alias */
+export async function noteDeleteCanceled(noteId) {
+  return noteDeleteFinished(noteId);
 }
 
 async function deliverAndClose(ticket, message, extraResolveKinds = []) {
@@ -257,7 +373,10 @@ export async function noteSetPrice(ticketId, usd) {
   if (ticket.estado === 'CERRADO') return { error: 'Esta nota ya fue atendida' };
   if (!(usd > 0)) return { error: 'Indique un monto en USD mayor que cero' };
 
-  const result = applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate());
+  // Solo los ítems de ESTA nota / pedido actual — no precios de pedidos cancelados.
+  const result = applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate(), {
+    ticketItems: ticket.items,
+  });
   if (result.error) return { error: result.error };
   return deliverAndClose(ticket, result.message);
 }
@@ -267,7 +386,9 @@ export async function noteNoStock(ticketId) {
   if (!ticket) return { error: 'Nota no encontrada' };
   if (ticket.estado === 'CERRADO') return { error: 'Esta nota ya fue atendida' };
 
-  const result = applyNotAvailable(ticket.clienteTelefono, await getBcvRate());
+  const result = applyNotAvailable(ticket.clienteTelefono, await getBcvRate(), {
+    ticketItems: ticket.items,
+  });
   if (result.error) return { error: result.error };
   return deliverAndClose(ticket, result.message);
 }

@@ -25,12 +25,26 @@ migrateLegacySession();
 // El buzón CRM abre de una vez (no espera a que WhatsApp termine de conectar).
 startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
 
+/** Usa Chrome/Edge instalado en la PC si Puppeteer no trae su propio navegador. */
+function resolveChromePath() {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
+  const candidates = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) || undefined;
+}
+
+const chromePath = resolveChromePath();
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: config.wweb.sessionPath }),
   webVersionCache: { type: 'none' },
   puppeteer: {
     headless: config.wweb.headless,
     protocolTimeout: 120_000,
+    ...(chromePath ? { executablePath: chromePath } : {}),
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   },
 });

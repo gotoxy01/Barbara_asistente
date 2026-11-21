@@ -1,5 +1,5 @@
 {
-  "seq": 3,
+  "seq": 10,
   "editingTicketId": null,
   "tickets": [
     {
@@ -47,6 +47,180 @@
       "motivo": "pesaje",
       "createdAt": 1795221189200,
       "updatedAt": 1795221207810
+    },
+    {
+      "ticketId": "T-4",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "cebollas",
+          "presentacion": "por pesar",
+          "detalle": "cebollas (3 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "✅ ¡Listo! Ya pesamos sus productos:\n• ⚖️ *cebollas (3 unidades)*: Bs. 1837.53 (o $ 2.00 USD)\n\n¿Desea agregar algo más? 🛒",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795236780087,
+      "updatedAt": 1795236795149
+    },
+    {
+      "ticketId": "T-5",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "zanahorias",
+          "presentacion": "por pesar",
+          "detalle": "zanahorias (4 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "¡Claro! Déjeme pesar sus zanahorias aquí en un momentico para darle el monto exacto y ya le aviso.",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795237304339,
+      "updatedAt": 1795238440730
+    },
+    {
+      "ticketId": "T-6",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "tomate",
+          "presentacion": "por pesar",
+          "detalle": "tomate (2 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "¡Claro! Déjeme pesar sus tomates aquí en un momentico para darle el monto exacto y ya le aviso.",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795238085083,
+      "updatedAt": 1795238464127
+    },
+    {
+      "ticketId": "T-7",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "tomate",
+          "presentacion": "por pesar",
+          "detalle": "tomate (2 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        },
+        {
+          "nombre": "tomate",
+          "presentacion": "por pesar",
+          "detalle": "tomate (2 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        },
+        {
+          "nombre": "tomates",
+          "presentacion": "por pesar",
+          "detalle": "tomates (3 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "Disculpe, el encargado en caja me confirma que por ahora *no tenemos disponible*: tomate (2 unidades), tomate (2 unidades), tomates (3 unidades). 😔\n\n¿Desea agregar algo más? 🛒",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795238496757,
+      "updatedAt": 1795239079423
+    },
+    {
+      "ticketId": "T-8",
+      "clienteTelefono": "584242194054",
+      "clienteNombre": "Hector Vargas",
+      "items": [
+        {
+          "nombre": "plátanos",
+          "presentacion": "por pesar",
+          "detalle": "plátanos (2 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "✅ ¡Listo! Ya pesamos sus productos:\n• ⚖️ *plátanos (2 unidades)*: Bs. 1837.53 (o $ 2.00 USD)\n\n¿Desea agregar algo más? 🛒",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795239286106,
+      "updatedAt": 1795239299450
+    },
+    {
+      "ticketId": "T-9",
+      "clienteTelefono": "584242125117",
+      "clienteNombre": "Luis Mendoza",
+      "items": [
+        {
+          "nombre": "papas",
+          "presentacion": "por pesar",
+          "detalle": "papas (3 unidades)",
+          "precio": null,
+          "cantidad": 1,
+          "pesable": true,
+          "botellon": false
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "✅ ¡Listo! Ya pesamos sus productos:\n• ⚖️ *papas (3 unidades)*: Bs. 3675.06 (o $ 4.00 USD)\n\n¿Desea agregar algo más? 🛒",
+      "estado": "CERRADO",
+      "motivo": "pesaje",
+      "createdAt": 1795240070724,
+      "updatedAt": 1795240086082
+    },
+    {
+      "ticketId": "T-10",
+      "clienteTelefono": "584242125117",
+      "clienteNombre": "Luis Mendoza",
+      "items": [
+        {
+          "nombre": "Comprobante de pago",
+          "detalle": "[El cliente adjuntó una imagen]"
+        }
+      ],
+      "montoTotalUSD": null,
+      "montoTotalBs": null,
+      "borradorRespuesta": "✅ Recibimos su comprobante. Su pedido será despachado en breve. 🛵",
+      "estado": "CERRADO",
+      "motivo": "pago",
+      "createdAt": 1795240161592,
+      "updatedAt": 1795240204303
     }
   ]
 }

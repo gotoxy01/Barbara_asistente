@@ -141,3 +141,52 @@ export function listOpenTickets(limit = 40) {
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, limit);
 }
+
+/**
+ * Una sola nota abierta por chat + motivo (evita mezclar/duplicar pedidos de distintos clientes).
+ * Si ya existe, actualiza ítems y metadatos; cierra duplicados viejos del mismo teléfono+motivo.
+ */
+export function upsertOpenTicket(data) {
+  loadIfNeeded();
+  const phone = String(data.clienteTelefono || '').replace(/\D/g, '');
+  const motivo = data.motivo || 'pesaje';
+  const open = [...memory.values()].filter(
+    (t) => t.estado !== 'CERRADO'
+      && String(t.clienteTelefono || '').replace(/\D/g, '') === phone
+      && (t.motivo || 'pesaje') === motivo,
+  ).sort((a, b) => b.createdAt - a.createdAt);
+
+  if (open.length) {
+    const keep = open[0];
+    for (const dup of open.slice(1)) {
+      updateTicket(dup.ticketId, { estado: 'CERRADO' });
+    }
+    return updateTicket(keep.ticketId, {
+      clienteNombre: data.clienteNombre ?? keep.clienteNombre,
+      items: Array.isArray(data.items) ? data.items : keep.items,
+      montoTotalUSD: data.montoTotalUSD ?? keep.montoTotalUSD,
+      montoTotalBs: data.montoTotalBs ?? keep.montoTotalBs,
+      borradorRespuesta: data.borradorRespuesta != null
+        ? String(data.borradorRespuesta).trim()
+        : keep.borradorRespuesta,
+      motivo,
+      estado: keep.estado === 'ESPERANDO_EDICION' ? 'ESPERANDO_EDICION' : 'PENDIENTE',
+    });
+  }
+  return createTicket({ ...data, clienteTelefono: phone || data.clienteTelefono, motivo });
+}
+
+/** Cierra todas las notas abiertas de un teléfono (p. ej. al cancelar el pedido). */
+export function closeTicketsForPhone(phone) {
+  loadIfNeeded();
+  const digits = String(phone || '').replace(/\D/g, '');
+  let n = 0;
+  for (const t of memory.values()) {
+    if (t.estado === 'CERRADO') continue;
+    if (String(t.clienteTelefono || '').replace(/\D/g, '') !== digits) continue;
+    clearEditingTicket(t.ticketId);
+    updateTicket(t.ticketId, { estado: 'CERRADO' });
+    n += 1;
+  }
+  return n;
+}

@@ -1,10 +1,14 @@
 import { Type } from '@google/genai';
 import { config } from '../config.js';
+import { publishCrm } from '../crm/events.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
 import { findProduct, getDeliveryCost, isBotellon, productLabel } from './catalogService.js';
+import { closeTicketsForPhone } from './ticketStore.js';
 
 export const BOLETA_MARKER = '[BOLETA]';
+/** Marca en el historial: a partir de aquí el carrito anterior ya no cuenta. */
+export const CANCEL_MARKER = '[PEDIDO_CANCELADO]';
 
 export const MORE_ITEMS_QUESTION = '¿Desea agregar algo más? 🛒';
 
@@ -13,15 +17,25 @@ export function renderPagoMovil() {
   return `📲 *Datos para Pago Móvil:*\n• Tlf: ${telefono}\n• C.I.: ${cedula}\n• Banco: ${banco}`;
 }
 export const ADDRESS_QUESTION =
-  'Para proceder con el envío, por favor indíquenos su dirección exacta y un punto de referencia. 🏠\n\n' +
-  '⚠️ *Importante:* no olvide indicar su *número de casa* (o de apto/quinta); sin él no podemos finalizar su pedido.';
+  'Para *cerrar y registrar* su pedido necesitamos una de estas dos opciones:\n\n' +
+  '🛵 *Delivery:* indíquenos su dirección exacta con *número de casa* (o apto/quinta) y un punto de referencia.\n' +
+  '🏪 *Retiro en tienda:* escriba “retiro en tienda” (o “paso a buscar”).\n\n' +
+  '⚠️ *Importante:* si no nos da la ubicación de delivery ni confirma retiro en tienda, el pedido *no queda cerrado* y no pasa a cocina/despacho.';
 
 export const HOUSE_NUMBER_REMINDER =
-  '⚠️ Para poder finalizar su pedido nos falta su *número de casa* (o de apto/quinta). 🏠\n\n' +
-  'Por favor, indíquenos su número de casa y en seguida cerramos su pedido.';
+  '⚠️ Para poder finalizar su pedido nos falta su *número de casa* (o apto/quinta), o bien confirmar *retiro en tienda*. 🏠\n\n' +
+  'Sin dirección de delivery ni retiro en tienda, el pedido no se cierra.';
 
-/** La dirección debe traer número de casa/apto, nombre de quinta o un "sin número" explícito. */
+/** Cliente retira en el local (no lleva delivery). */
+export function isPickupAddress(address) {
+  return /retiro\s+en\s+(la\s+)?tienda|paso\s+a\s+(buscar|buscarlo)|voy\s+a\s+(buscar|buscarlo|pasar)|recoger\s+en\s+(la\s+)?tienda|buscar\s+en\s+(la\s+)?tienda|pickup|pasar\s+por\s+(la\s+)?tienda/i.test(
+    String(address || ''),
+  );
+}
+
+/** La dirección debe traer número de casa/apto, nombre de quinta, "sin número", o ser retiro en tienda. */
 export function hasHouseNumber(address) {
+  if (isPickupAddress(address)) return true;
   return /\d/.test(address) || /\b(quinta|qta\.?)\s+\S+|\bs\/n\b|\bsin\s+n[uú]mero\b/i.test(address);
 }
 
@@ -74,11 +88,12 @@ function money(usd, bs) {
 
 /**
  * Líneas del pedido + tarifas de delivery + totales.
- * Un solo delivery por pedido, al precio del artículo "Delivery costo" del sistema de caja.
+ * Un solo delivery por pedido (se omite si es retiro en tienda).
  * @param {object[]} items
  * @param {import('./bcvService.js').BcvRate|null} bcv
+ * @param {{ pickup?: boolean }} [opts]
  */
-export function computeTotals(items, bcv) {
+export function computeTotals(items, bcv, { pickup = false } = {}) {
   const rate = bcv?.rate;
   const line = (usd) => ({ usd: round2(usd), bs: rate ? toBolivares(usd, rate) : null });
 
@@ -89,17 +104,18 @@ export function computeTotals(items, bcv) {
   const pending = pendingWeighItems(items).map((i) => i.detalle);
 
   const fees = [];
-  if (items.length) fees.push({ label: '🚚 Delivery', ...line(getDeliveryCost()) });
+  if (items.length && !pickup) fees.push({ label: '🚚 Delivery', ...line(getDeliveryCost()) });
+  if (items.length && pickup) fees.push({ label: '🏪 Retiro en tienda', ...line(0) });
 
   const all = [...lines, ...fees];
   const totalUsd = round2(all.reduce((s, l) => s + l.usd, 0));
   // El total en Bs es la suma de las líneas, para que la boleta cuadre al sumarla a mano.
-  const totalBs = rate ? round2(all.reduce((s, l) => s + l.bs, 0)) : null;
-  return { lines, fees, pending, totalUsd, totalBs, rate };
+  const totalBs = rate ? round2(all.reduce((s, l) => s + (l.bs || 0), 0)) : null;
+  return { lines, fees, pending, totalUsd, totalBs, rate, pickup: !!pickup };
 }
 
-export function renderBoleta(items, bcv) {
-  const t = computeTotals(items, bcv);
+export function renderBoleta(items, bcv, { pickup = false } = {}) {
+  const t = computeTotals(items, bcv, { pickup });
   return [
     '🧾 *RESUMEN DE SU PEDIDO - Abasto Los Cuchos*',
     SEPARATOR,
@@ -107,6 +123,10 @@ export function renderBoleta(items, bcv) {
     SEPARATOR,
     `💰 *TOTAL A PAGAR:* ${money(t.totalUsd, t.totalBs)}`,
     t.rate ? `(Calculado a Tasa BCV: ${t.rate.toFixed(2)} Bs/USD)` : '(El monto en Bs. se calcula a la Tasa BCV del día al momento del pago)',
+    '',
+    pickup
+      ? '🏪 *Modalidad:* Retiro en tienda'
+      : '⚠️ El pedido *solo se cierra* cuando confirme *dirección de delivery* (con número de casa) o *retiro en tienda*.',
   ].join('\n');
 }
 
@@ -120,13 +140,19 @@ export function renderDeliveryFees(bcv) {
 /** Resumen del carrito para el System Prompt de Bárbara. */
 export function renderOrderContext(phone, bcv) {
   const order = db.getActiveOrder(phone);
-  if (!order || !order.items.length) return 'El cliente aún no tiene productos en su pedido.';
+  if (!order || !order.items.length) {
+    return [
+      'El cliente aún no tiene productos en su pedido ACTUAL.',
+      'IMPORTANTE: ignore productos de mensajes viejos o de pedidos cancelados. Solo agregue lo que pida AHORA.',
+    ].join('\n');
+  }
   const t = computeTotals(order.items, bcv);
   const status = order.status === 'boleta'
-    ? 'BOLETA YA ENVIADA: falta que el cliente indique su dirección de entrega.'
+    ? 'BOLETA YA ENVIADA: el pedido NO está cerrado. Falta dirección de delivery (con número de casa) O “retiro en tienda”.'
     : 'EN CURSO: el cliente sigue agregando productos.';
   return [
-    `Estado: ${status}`,
+    'SOLO ESTE CARRITO ES VÁLIDO (pedido actual de ESTE chat). No mezcle ni reincorpore ítems de pedidos cancelados ni del historial antiguo.',
+    `Pedido #${order.id} · Estado: ${status}`,
     ...[...t.lines, ...t.fees].map((l) => `- ${l.label}: ${money(l.usd, l.bs)}`),
     ...pendingWeighItems(order.items).map((i) => (i.consulta
       ? `- 🔎 ${i.detalle}: PENDIENTE DE CONSULTA (el encargado en caja está verificando disponibilidad y precio)`
@@ -134,6 +160,63 @@ export function renderOrderContext(phone, bcv) {
     `Total actual${t.pending.length ? ' (sin los productos pendientes del encargado)' : ''}: ${money(t.totalUsd, t.totalBs)}`,
     ...(order.boleta_pendiente ? ['El cliente ya pidió cerrar el pedido: la boleta se enviará sola en cuanto el encargado envíe el precio.'] : []),
   ].join('\n');
+}
+
+/** Historial desde el último pedido cancelado (o completo si no hubo). */
+export function trimHistorySinceCancel(history) {
+  if (!Array.isArray(history) || !history.length) return history || [];
+  let start = 0;
+  for (let i = 0; i < history.length; i += 1) {
+    if (history[i].role === 'model' && String(history[i].content || '').includes(CANCEL_MARKER)) {
+      start = i + 1;
+    }
+  }
+  return history.slice(start);
+}
+
+/**
+ * En conversación nueva: solo el turno actual (mensajes del cliente tras la última respuesta),
+ * para no arrastrar chats de pedidos ya cancelados.
+ */
+export function trimHistoryForFreshSession(history) {
+  if (!Array.isArray(history) || !history.length) return history || [];
+  const lastReply = history.map((m) => m.role).lastIndexOf('model');
+  if (lastReply < 0) return history.slice(-6);
+  const pending = history.slice(lastReply + 1);
+  return pending.length ? pending : history.slice(-4);
+}
+
+/**
+ * Seguimiento corto del hilo ("2", "sí", "la pequeña", "¿hay de esa?").
+ * No exige repetir el nombre del producto que se estaba hablando.
+ */
+export function isShortFollowUp(customerText) {
+  const text = String(customerText || '').trim();
+  if (!text) return true;
+  if (/pequeñ[ao]s?|grand[eo]s?|median[ao]s?|m[aá]s\s+grand|m[aá]s\s+peque/i.test(text) && text.length <= 48) {
+    return true;
+  }
+  if (/^(y\s+)?(hay|tienen|tiene|cuesta)?\s*(de\s+)?(la|el|las|los)?\s*(pequeñ|grand|median|esa|ese|esos|esas|otra|otro|mismo|misma)/i.test(text)) {
+    return true;
+  }
+  if (text.length <= 28 && /^(s[ií]|no|ok|okay|dale|va|listo|ese|esa|eso|esos|esas|el de|la de|unos?|unas?|\d)/i.test(text)) {
+    return true;
+  }
+  return text.length <= 10 && !/[a-záéíóúñ]{5,}/i.test(text);
+}
+
+/** ¿El texto del cliente parece referirse a este producto? */
+export function customerMentionsProduct(productName, customerText) {
+  const text = String(customerText || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  const name = String(productName || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+  if (!text.trim() || !name.trim()) return true; // sin texto no bloqueamos
+  if (isShortFollowUp(customerText)) return true;
+  const token = name.split(/[\s(/]+/).filter((t) => t.length > 2)[0];
+  if (!token) return true;
+  if (text.includes(token)) return true;
+  // Diminutivos / typos suaves: "tomate" ⊂ "tomates", "quesito" ≈ "queso"
+  if (token.length >= 4 && text.includes(token.slice(0, Math.max(4, token.length - 1)))) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,29 +308,48 @@ function closePending(order, header, bcv) {
   return { order, message: `${header}\n\n${closing}` };
 }
 
-/** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
-export function applyNotAvailable(phone, bcv) {
-  const order = db.getActiveOrder(phone);
-  const pending = order ? pendingWeighItems(order.items) : [];
-  if (!pending.length) return { error: `+${phone} no tiene productos pendientes de consulta.` };
+function matchPendingByTicket(pending, ticketItems) {
+  if (!ticketItems?.length) return pending;
+  const keys = ticketItems.map((i) => String(i.detalle || i.nombre || '').toLowerCase()).filter(Boolean);
+  if (!keys.length) return pending;
+  const matched = pending.filter((p) => {
+    const d = String(p.detalle || p.nombre || '').toLowerCase();
+    return keys.some((k) => d.includes(k) || k.includes(d) || d.includes(k.split('(')[0].trim()));
+  });
+  // Si la nota no cuadra con el carrito actual, no inventar: usar solo lo pendiente MÁS reciente.
+  if (!matched.length) {
+    return pending.slice(-1);
+  }
+  return matched;
+}
 
-  order.items = order.items.filter((i) => i.precio != null);
+/** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
+export function applyNotAvailable(phone, bcv, { ticketItems = null } = {}) {
+  const order = db.getActiveOrder(phone);
+  const allPending = order ? pendingWeighItems(order.items) : [];
+  const pending = matchPendingByTicket(allPending, ticketItems);
+  if (!pending.length) return { error: `+${phone} no tiene productos pendientes de consulta en el pedido actual.` };
+
+  const drop = new Set(pending);
+  order.items = order.items.filter((i) => i.precio != null || !drop.has(i));
   const header = `Disculpe, el encargado en caja me confirma que por ahora *no tenemos disponible*: ${pending.map((i) => i.detalle).join(', ')}. 😔`;
   return closePending(order, header, bcv);
 }
 
 /**
- * Aplica el precio que envió el encargado a TODOS los productos por pesar del cliente.
- * Devuelve el mensaje para el cliente (o la boleta, si ya había pedido cerrar el pedido).
+ * Aplica el precio del encargado a los pendientes del pedido ACTUAL.
+ * Si viene de una nota (ticketItems), solo toca esos ítems — no precios viejos de otro pedido.
  */
-export function applyWeighedPrice(phone, usd, bcv) {
+export function applyWeighedPrice(phone, usd, bcv, { ticketItems = null } = {}) {
   const order = db.getActiveOrder(phone);
-  const pending = order ? pendingWeighItems(order.items) : [];
-  if (!pending.length) return { error: `+${phone} no tiene productos pendientes por pesar.` };
+  const allPending = order ? pendingWeighItems(order.items) : [];
+  const pending = matchPendingByTicket(allPending, ticketItems);
+  if (!pending.length) return { error: `+${phone} no tiene productos pendientes por pesar en el pedido actual.` };
 
   const detalle = pending.map((i) => i.detalle).join(', ');
   const consulta = pending.every((i) => i.consulta);
-  order.items = order.items.filter((i) => i.precio != null);
+  const drop = new Set(pending);
+  order.items = order.items.filter((i) => i.precio != null || !drop.has(i));
   order.items.push({
     nombre: consulta ? 'Productos consultados' : 'Productos pesados',
     presentacion: consulta ? 'confirmado en tienda' : 'pesado en tienda',
@@ -317,7 +419,12 @@ export const ORDER_TOOL_DECLARATIONS = [
   },
   {
     name: 'vaciar_pedido',
-    description: 'Elimina todos los productos del pedido (solo si el cliente pide cancelar o empezar de nuevo).',
+    description: 'Vacía el carrito para empezar de nuevo (el cliente quiere cambiar todo o armar otro pedido). NO la uses si dice que NO quiere el pedido / que lo cancelen: en ese caso usa cancelar_pedido.',
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: 'cancelar_pedido',
+    description: 'Cancela por completo el pedido del cliente (en curso, con boleta o ya registrado). Úsala SIEMPRE que diga que no quiere proceder, que cancele, que ya no lo quiere, que no lo mande, que anule el pedido, etc.',
     parameters: { type: Type.OBJECT, properties: {} },
   },
   {
@@ -327,11 +434,14 @@ export const ORDER_TOOL_DECLARATIONS = [
   },
   {
     name: 'registrar_direccion',
-    description: 'Guarda la dirección de entrega que el cliente envió después de recibir la boleta, y envía el pedido al equipo de despacho.',
+    description: 'Cierra el pedido tras la boleta: guarda la dirección de delivery O registra retiro en tienda, y envía la comanda al equipo. Sin esto el pedido NO queda cerrado. Use también si el cliente dice “retiro en tienda”, “paso a buscar”, etc.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        direccion: { type: Type.STRING, description: 'Dirección exacta, número de casa/apto y punto de referencia, tal como los escribió el cliente' },
+        direccion: {
+          type: Type.STRING,
+          description: 'Dirección exacta con número de casa/apto, O el texto “retiro en tienda” / “paso a buscar” si recoge en el local',
+        },
       },
       required: ['direccion'],
     },
@@ -384,6 +494,13 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
 
       const p = found.product;
+      // Auditoría dura: no agregar algo que el cliente no pidió en este turno (evita arrastrar pedidos viejos).
+      if (customerText && !customerMentionsProduct(p.nombre, customerText) && !customerMentionsProduct(producto, customerText)) {
+        return {
+          error: `El cliente no pidió "${p.nombre}" en su mensaje actual.`,
+          instruccion: 'NO agregue productos del historial viejo. Confirme con el cliente qué desea AHORA, usando solo su último mensaje.',
+        };
+      }
       let addQty = qty;
 
       // "dame $2 de queso": convierte monto → kilos con el precio/kg de la BD (sin pesaje).
@@ -414,6 +531,24 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     solicitar_pesaje({ producto, cantidad }) {
       const nombre = String(producto ?? '').trim();
       if (!nombre) return { error: 'Indique el producto a pesar.' };
+      // Nunca anotar el mensaje completo como "producto".
+      if (nombre.length > 60 || /\n/.test(nombre) || /^(hola|buenas|quiero|dame|necesito)\b/i.test(nombre)) {
+        const found = findProduct(nombre);
+        const clean = found.product?.nombre;
+        if (!clean) {
+          return {
+            error: 'Nombre de producto inválido para pesaje.',
+            instruccion: 'Use el nombre corto del producto (ej. "tomate", "queso"), no la frase completa del cliente.',
+          };
+        }
+        return handlers.solicitar_pesaje({ producto: clean, cantidad });
+      }
+      if (customerText && !customerMentionsProduct(nombre, customerText)) {
+        return {
+          error: `El cliente no pidió pesar "${nombre}" en su mensaje actual.`,
+          instruccion: 'Solo abra pesaje de lo que el cliente pidió AHORA. No reutilice productos de pedidos cancelados.',
+        };
+      }
       const qty = String(cantidad ?? '').trim();
       const detalle = qty ? `${nombre} (${qty})` : nombre;
       const order = db.getOrCreateActiveOrder(phone);
@@ -472,10 +607,41 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (order) {
         order.items = [];
         order.status = 'abierto';
+        order.boleta_pendiente = 0;
         db.saveOrder(order);
       }
       state.cartChanged = true;
-      return { ok: true };
+      return { ok: true, instruccion: 'Confirme que el carrito quedó vacío y pregunte qué desea pedir ahora.' };
+    },
+
+    cancelar_pedido() {
+      const canceled = db.cancelPendingOrders(phone);
+      closeTicketsForPhone(phone);
+      db.resolveAlertsByPhoneKind(phone, 'order');
+      db.resolveAlertsByPhoneKind(phone, 'weigh');
+      db.resolveAlertsByPhoneKind(phone, 'payment');
+      db.resolveAlertsByPhoneKind(phone, 'ticket');
+      // Carrito limpio para el próximo pedido de este chat.
+      db.startFreshActiveOrder(phone);
+      state.cartChanged = true;
+      state.canceled = true;
+      if (!canceled.length) {
+        return {
+          ok: true,
+          nota: 'No había pedido activo que cancelar.',
+          instruccion: 'Diga amablemente que no hay un pedido en curso y ofrezca ayudar si desea armar uno nuevo.',
+        };
+      }
+      for (const o of canceled) {
+        publishCrm({ type: 'kitchen', orderId: o.id, kitchenStatus: 'cancelado', phone });
+      }
+      const ids = canceled.map((o) => `#${o.id}`).join(', ');
+      return {
+        ok: true,
+        cancelados: canceled.map((o) => o.id),
+        cancelMarker: CANCEL_MARKER,
+        instruccion: `Confirme con amabilidad que el pedido ${ids} quedó cancelado y que puede pedir de nuevo cuando guste. Incluya exactamente ${CANCEL_MARKER} al final de su respuesta (el cliente no lo verá; el sistema lo usa). No insista en continuar ese pedido.`,
+      };
     },
 
     generar_boleta() {
@@ -496,7 +662,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       state.boleta = renderBoleta(order.items, bcv);
       return {
         ok: true,
-        instruccion: `Escribe exactamente ${BOLETA_MARKER} en tu respuesta (el sistema lo reemplaza por la boleta con los montos exactos) y a continuación pide la dirección de entrega. No escribas tú los montos ni el total.`,
+        instruccion: `Escribe exactamente ${BOLETA_MARKER} en tu respuesta (el sistema lo reemplaza por la boleta). Deja claro que el pedido AÚN NO ESTÁ CERRADO hasta que indiquen dirección de delivery (con número de casa) o “retiro en tienda”. No escribas tú los montos ni el total.`,
       };
     },
 
@@ -504,25 +670,41 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       const order = db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
       if (order.status !== 'boleta') return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
-      const address = String(direccion ?? '').trim();
-      if (!hasHouseNumber(address)) {
+      const raw = String(direccion ?? '').trim();
+      const pickup = isPickupAddress(raw);
+      if (!pickup && !hasHouseNumber(raw)) {
         state.missingHouseNumber = true;
         return {
-          error: 'La dirección no incluye el número de casa/apto.',
-          instruccion: 'NO registres el pedido todavía. Pide amablemente al cliente su número de casa (o apto/quinta) para poder finalizar el pedido.',
+          error: 'Falta número de casa/apto o confirmación de retiro en tienda.',
+          instruccion: 'NO registres el pedido todavía. Pida dirección con número de casa, o que escriba “retiro en tienda”. Sin eso el pedido no se cierra.',
         };
       }
+      const address = pickup ? '🏪 Retiro en tienda' : raw;
+      const t = computeTotals(order.items, bcv, { pickup });
       order.address = address;
       order.status = 'recibido';
       order.kitchen_status = 'nuevo';
+      order.total_usd = t.totalUsd;
+      order.total_bs = t.totalBs;
+      order.bcv_rate = t.rate ?? null;
       db.saveOrder(order);
       state.addressSaved = true;
+      state.pickup = pickup;
 
+      const boletaFinal = renderBoleta(order.items, bcv, { pickup });
       await notify(
-        `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\nDirección: ${order.address}\n\n${renderBoleta(order.items, bcv)}`,
+        `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\n${pickup ? 'Modalidad: RETIRO EN TIENDA' : `Dirección: ${order.address}`}\n\n${boletaFinal}`,
         { kind: 'order', phone, title: `Comanda #${order.id}`, whatsapp: false },
       );
-      return { ok: true, pedido_numero: order.id, direccion: order.address, instruccion: 'Confirma al cliente que su pedido fue registrado e incluye los datos de Pago Móvil.' };
+      return {
+        ok: true,
+        pedido_numero: order.id,
+        direccion: order.address,
+        pickup,
+        instruccion: pickup
+          ? 'Confirme que el pedido quedó registrado para RETIRO EN TIENDA (sin delivery) e incluya datos de Pago Móvil.'
+          : 'Confirme que el pedido fue registrado con esa dirección e incluya los datos de Pago Móvil.',
+      };
     },
   };
 
@@ -547,10 +729,13 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
 
     const address = calls.find((c) => c.name === 'registrar_direccion');
     if (address) {
+      const modo = address.result.pickup
+        ? '🏪 *Modalidad:* Retiro en tienda (sin cargo de delivery)'
+        : `📍 *Dirección de entrega:* ${address.result.direccion}`;
       return `¡Muchas gracias${name ? `, ${name.split(' ')[0]}` : ''}! ✅ Su pedido *#${address.result.pedido_numero}* fue registrado con éxito.\n\n` +
-        `📍 *Dirección de entrega:* ${address.result.direccion}\n\n` +
-        'Si paga por Pago Móvil, envíenos la captura del pago por este chat y de inmediato despachamos su pedido. 🛵\n' +
-        'También puede pagar en efectivo (USD o Bs.) al recibir. ¡Gracias por preferir *Abasto Los Cuchos*! 🙏';
+        `${modo}\n\n` +
+        'Si paga por Pago Móvil, envíenos la captura del pago por este chat. 🛵\n' +
+        'También puede pagar en efectivo (USD o Bs.). ¡Gracias por preferir *Abasto Los Cuchos*! 🙏';
     }
     return `${BOLETA_MARKER}\n\n${ADDRESS_QUESTION}`;
   }

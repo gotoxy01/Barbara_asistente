@@ -9,6 +9,7 @@ import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from '
 import {
   ADDRESS_QUESTION,
   BOLETA_MARKER,
+  CANCEL_MARKER,
   createOrderTools,
   HOUSE_NUMBER_REMINDER,
   isSoldByWeight,
@@ -18,9 +19,16 @@ import {
   pendingWeighItems,
   renderDeliveryFees,
   renderOrderContext,
+  isShortFollowUp,
+  trimHistoryForFreshSession,
+  trimHistorySinceCancel,
   renderWeighWaitMessage,
   weightMentionedFor,
 } from './orderService.js';
+import { closeTicketsForPhone } from './ticketStore.js';
+
+/** Cuántos mensajes del hilo se usan para seguimiento de producto (usuario + Bárbara). */
+const THREAD_FOLLOW_MSGS = 4;
 
 const WAITING_WEIGHT_REPLY =
   '¡Claro! Déjeme pesarlo aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️';
@@ -104,13 +112,48 @@ function isPauseExpired(chat) {
 
 const GROUP_PREFIX_RE = /^\[Mensaje escrito en el grupo [^\]]*\]\s*/;
 
+function cleanMsgContent(content) {
+  return String(content || '')
+    .replace(GROUP_PREFIX_RE, '')
+    .replace(/\[PEDIDO_CANCELADO\]/g, '')
+    .replace(/\[sin respuesta\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** Lo que escribió el cliente desde la última respuesta de Bárbara (sin marcas del sistema). */
 function pendingCustomerText(history) {
   const lastReply = history.map((m) => m.role).lastIndexOf('model');
   return history.slice(lastReply + 1)
     .filter((m) => m.role === 'user')
-    .map((m) => m.content.replace(GROUP_PREFIX_RE, ''))
+    .map((m) => cleanMsgContent(m.content))
+    .filter(Boolean)
     .join('\n');
+}
+
+/** Últimos N mensajes del hilo (user + model) para seguimiento de tema. */
+function recentThread(history, n = THREAD_FOLLOW_MSGS) {
+  if (!Array.isArray(history) || !history.length) return [];
+  return history
+    .slice(-Math.max(n, 1))
+    .map((m) => ({ role: m.role, content: cleanMsgContent(m.content) }))
+    .filter((m) => m.content);
+}
+
+/**
+ * Texto del cliente enriquecido con el hilo reciente cuando es un seguimiento
+ * ("¿hay de la pequeña?" → sigue hablando del chocolate / producto anterior).
+ */
+function customerTextWithThread(history, fallback = '') {
+  const pending = pendingCustomerText(history) || fallback;
+  const thread = recentThread(history, THREAD_FOLLOW_MSGS);
+  if (!pending) return fallback;
+  if (!isShortFollowUp(pending) && pending.length > 40) return pending;
+  if (thread.length < 2) return pending;
+  const resumen = thread
+    .map((m) => `${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${m.content}`)
+    .join('\n');
+  return `${pending}\n\n[Hilo reciente — continúa este tema, no cambie de producto:\n${resumen}]`;
 }
 
 const WEIGH_CLAIM_RE = /pes(e|ar|ado|aje)|balanza|momentico.*peso|pesarlo aqu[ií]/i;
@@ -128,19 +171,26 @@ async function ensureHandOff(aiText, customerText, tools) {
   const text = String(customerText || '').trim();
   if (!text) return;
 
+  const found = searchProducts(text, {});
+  const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
+  if (!weighables.length) return;
+
+  const needsScale = weighables.filter((p) => !weightMentionedFor(p.nombre, text));
+  const targets = needsScale.length ? needsScale : weighables;
+  const primary = targets.find((p) => /^(tomate|pl[aá]tano|cebolla|aguacate|lim[oó]n|papa|yuca|piment[oó]n|ajo|cilantro|lechuga)$/i.test(p.nombre))
+    || targets[0];
+  if (!primary?.nombre) return;
+
   if (WEIGH_CLAIM_RE.test(aiText)) {
-    await tools.execute('solicitar_pesaje', { producto: text.slice(0, 120), cantidad: '' });
-    verbose('Bárbara habló de pesaje sin herramienta: se abrió solicitud de balanza.');
+    // Solo el nombre de catálogo — nunca la frase completa del cliente.
+    await tools.execute('solicitar_pesaje', { producto: primary.nombre, cantidad: 'al gusto / por pesar' });
+    verbose(`Bárbara habló de pesaje sin herramienta: balanza para ${primary.nombre}.`);
     return;
   }
 
   // Cotización suelta ("¿hay tomates?", "precio del tomate") → no ticket.
   if (moneyAmountMentioned(text)) return;
   if (/^(hay|tienen|tiene|cuesta|precio|cu[aá]nto|me\s+cobra)\b/i.test(text)) return;
-
-  const found = searchProducts(text, {});
-  const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
-  if (!weighables.length) return;
 
   // "tomates", "dame tomates", "2 tomates" → balanza. "1 kilo de tomate" → no.
   const shortProductAsk = text.length <= 48;
@@ -149,10 +199,6 @@ async function ensureHandOff(aiText, customerText, tools) {
     return;
   }
 
-  const needsScale = weighables.filter((p) => !weightMentionedFor(p.nombre, text));
-  const targets = needsScale.length ? needsScale : weighables;
-  const primary = targets.find((p) => /^(tomate|pl[aá]tano|cebolla|aguacate|lim[oó]n|papa|yuca|piment[oó]n|ajo|cilantro|lechuga)$/i.test(p.nombre))
-    || targets[0];
   const qtyMatch = text.match(/\b(\d+)\b/);
   const cantidad = qtyMatch ? `${qtyMatch[1]} ${Number(qtyMatch[1]) === 1 ? 'unidad' : 'unidades'}` : 'al gusto / por pesar';
   await tools.execute('solicitar_pesaje', { producto: primary.nombre, cantidad });
@@ -176,28 +222,62 @@ function greetingReply(text, isNewConversation) {
 }
 
 /**
- * Busca productos para todos los mensajes del cliente que Bárbara aún no ha respondido
- * (p. ej. preguntas enviadas mientras el chat estaba pausado o varias seguidas).
- * Si ninguno nombra un producto (ej. "¿y el de 1 kilo?"), se combina con el último mensaje respondido.
+ * Busca productos con seguimiento del hilo (mín. últimos 4 mensajes).
+ * Evita que "¿hay de la pequeña?" se interprete como otro producto (ej. bolsa de hielo)
+ * cuando el cliente venía hablando de samba/chocolate u otra cosa.
  */
 function buildProductContext(history, bcv) {
   const lastReply = history.map((m) => m.role).lastIndexOf('model');
-  // Los adjuntos llegan como descripciones del sistema ("[El cliente adjuntó...]"), no como consultas.
   const pending = history
     .slice(lastReply + 1)
-    .filter((m) => m.role === 'user' && !m.content.startsWith('[El cliente'))
-    .map((m) => m.content.replace(GROUP_PREFIX_RE, ''))
+    .filter((m) => m.role === 'user' && !String(m.content).startsWith('[El cliente'))
+    .map((m) => cleanMsgContent(m.content))
+    .filter(Boolean)
     .slice(-5);
 
-  let result = searchProducts(pending, { bcv });
+  const thread = recentThread(history, THREAD_FOLLOW_MSGS);
+  const threadBlob = thread.map((m) => m.content).join('\n');
+  const pendingBlob = pending.join('\n');
+  const followUp = !pending.length || isShortFollowUp(pendingBlob)
+    || /pequeñ|grand|median|esa|ese|esos|esas|otra|otro|mismo|misma|de\s+la|de\s+el|y\s+el|y\s+la/i.test(pendingBlob);
 
-  if (result.type === 'none' && result.terms.length === 0 && pending.length) {
-    const previous = history.slice(0, lastReply + 1).reverse().find((m) => m.role === 'user');
-    if (previous) {
-      const retry = searchProducts(`${previous.content.replace(GROUP_PREFIX_RE, '')} ${pending.join(' ')}`, { bcv });
-      if (retry.type === 'matches') result = retry;
+  let result = pending.length ? searchProducts(pending, { bcv }) : searchProducts(threadBlob, { bcv });
+
+  // Seguimiento o coincidencia floja → buscar con los últimos 4 mensajes del hilo.
+  if (followUp || result.type === 'none' || result.soft) {
+    const withThread = searchProducts(
+      thread.length ? `${threadBlob}\n${pendingBlob}`.trim() : pendingBlob,
+      { bcv },
+    );
+    if (withThread.type === 'matches') {
+      const hilo = thread
+        .map((m) => `• ${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${m.content}`)
+        .join('\n');
+      result = {
+        ...withThread,
+        text: [
+          `SEGUIMIENTO DEL HILO (últimos ${thread.length || 1} mensajes — la pregunta actual continúa ESTE tema; no cambie de producto):`,
+          hilo || pendingBlob,
+          '',
+          withThread.text,
+          '',
+          'Si el cliente dijo “pequeña/grande/esa/la de…”, filtre las opciones ANTERIORES del mismo producto (ej. chocolates), no ofrezca un producto distinto.',
+        ].join('\n'),
+      };
+    } else if (result.type === 'none' && pending.length) {
+      const previousUsers = history
+        .slice(0, lastReply + 1)
+        .filter((m) => m.role === 'user')
+        .map((m) => cleanMsgContent(m.content))
+        .filter(Boolean)
+        .slice(-3);
+      if (previousUsers.length) {
+        const retry = searchProducts([...previousUsers, ...pending], { bcv });
+        if (retry.type === 'matches') result = retry;
+      }
     }
   }
+
   return result;
 }
 
@@ -248,9 +328,24 @@ async function handleCustomerMessageNow({ phone, name, text }, { notify = notify
     await abrirTicketPago({ phone, name: displayName, note });
   }
 
+  // Conversación nueva (hueco largo) o tras cancelaciones: no arrastrar carrito/notas viejas.
+  if (isNewConversation) {
+    resetCustomerOrderSession(phone, { quiet: true });
+  }
+
   const history = db.getHistory(phone);
   const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
   return finishReply({ phone, displayName, text, notify, outcome });
+}
+
+/** Limpia carrito abierto + notas de caja de este chat (pedidos recibidos en cocina no se tocan). */
+function resetCustomerOrderSession(phone, { quiet = false } = {}) {
+  const cleared = db.clearActiveCarts(phone);
+  closeTicketsForPhone(phone);
+  db.startFreshActiveOrder(phone);
+  if (!quiet && cleared.length) {
+    verbose(`[${phone}] Sesión de pedido reiniciada (${cleared.length} carrito(s) viejo(s) descartados).`);
+  }
 }
 
 /**
@@ -258,9 +353,21 @@ async function handleCustomerMessageNow({ phone, name, text }, { notify = notify
  */
 async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
   const bcv = await getBcvRate();
-  const products = buildProductContext(history, bcv);
+  // Tras cancelar se corta el historial; siempre se conservan al menos los últimos 4 msgs del hilo.
+  let scopedHistory = trimHistorySinceCancel(history);
+  if (isNewConversation) {
+    const fresh = trimHistoryForFreshSession(scopedHistory);
+    scopedHistory = scopedHistory.slice(-THREAD_FOLLOW_MSGS);
+    if (fresh.length > scopedHistory.length) scopedHistory = fresh;
+  }
+  if (scopedHistory.length < THREAD_FOLLOW_MSGS && history.length) {
+    scopedHistory = trimHistorySinceCancel(history).slice(-THREAD_FOLLOW_MSGS);
+  }
+
+  const products = buildProductContext(scopedHistory, bcv);
   const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
-  const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText: pendingCustomerText(history) });
+  const customerText = customerTextWithThread(scopedHistory, text);
+  const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
   const systemPrompt = buildSystemPrompt({
     name: displayName, phone, productContext, orderContext: renderOrderContext(phone, bcv), isNewConversation,
   });
@@ -271,13 +378,13 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let model;
   const pendingBefore = pendingWeighItems(db.getActiveOrder(phone)?.items ?? []).length;
   try {
-    const result = await generateBarbaraReply(systemPrompt, history, tools);
+    const result = await generateBarbaraReply(systemPrompt, scopedHistory, tools);
     if (result.ignore && !tools.state.cartChanged && !isGreeting(text)) {
       verbose(`[${phone}] Mensaje ajeno a la bodega: Bárbara no responde.`);
       if (resume) db.addMessage(phone, 'model', SILENT_MARK);
       return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
     }
-    if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, pendingCustomerText(history), tools);
+    if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, customerText, tools);
     reply = result.ignore && !tools.state.cartChanged
       ? greetingReply(text, isNewConversation)
       : enforceBusinessName(stripPrematurePaymentPitch(applyOrderFlow(result.text, tools.state), tools.state)) || EMPTY_ESCALATION_REPLY;
@@ -302,8 +409,8 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     const orderContext = renderOrderContext(phone, bcv);
     const audited = await runAuditor({
       phone,
-      mensaje_cliente: pendingCustomerText(history) || text,
-      datos_bd: `${productContext}\n\nPedido actual:\n${orderContext}`,
+      mensaje_cliente: customerText,
+      datos_bd: `${productContext}\n\nPedido actual (ÚNICO válido):\n${orderContext}\n\nRegla: no mencione ni confirme productos que no estén en el mensaje del cliente ni en este pedido actual.`,
       borrador_barbara: reply,
       isNewConversation,
       resume,
@@ -360,7 +467,18 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
 
   // Solo excepciones físicas → ficha telegráfica + botones 1-tap. El cliente ya recibió tono de mostrador.
   if (!escalated && kind === 'pesaje') {
-    const pending = order ? pendingWeighItems(order.items) : [];
+    const allPending = order ? pendingWeighItems(order.items) : [];
+    // Solo lo pedido/pesado en ESTE turno (no pendientes viejos de otro pedido).
+    const weighed = tools?.state?.weighed || [];
+    let pending = allPending;
+    if (weighed.length) {
+      const filtered = allPending.filter((p) => weighed.some((w) => {
+        const hay = String(p.nombre || p.detalle || '').toLowerCase();
+        const needle = String(w).toLowerCase();
+        return hay.includes(needle) || needle.includes(hay.split('(')[0].trim());
+      }));
+      if (filtered.length) pending = filtered;
+    }
     if (pending.length) {
       await solicitarAprobacionRapida({
         phone,
@@ -383,7 +501,14 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     if (holdReply && (!reply || !/env[ií]o|flete|delivery/i.test(reply))) reply = holdReply;
   }
 
+  // Historial: guardar marca de cancelación; WhatsApp: sin la marca.
+  if (reply && tools?.state?.canceled && !reply.includes(CANCEL_MARKER)) {
+    reply = `${reply.trim()}\n${CANCEL_MARKER}`;
+  }
   if (reply) db.addMessage(phone, 'model', reply);
+  const forCustomer = reply
+    ? reply.split(CANCEL_MARKER).join('').replace(/\n{3,}/g, '\n\n').trim()
+    : null;
 
   if (escalated) {
     db.pauseChat(phone);
@@ -396,7 +521,14 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     );
   }
 
-  return { reply, escalated, paused: outcome.paused || escalated, productContext: outcome.productContext, toolCalls: outcome.toolCalls, model: outcome.model };
+  return {
+    reply: forCustomer,
+    escalated,
+    paused: outcome.paused || escalated,
+    productContext: outcome.productContext,
+    toolCalls: outcome.toolCalls,
+    model: outcome.model,
+  };
 }
 
 /**
@@ -526,6 +658,7 @@ async function resumeOneNow(phone) {
   if (!text.trim()) return;
   const lastReplyAt = db.getLastModelMessageAt(phone);
   const isNewConversation = !lastReplyAt || Date.now() - lastReplyAt > config.newConversationHours * 3600 * 1000;
+  if (isNewConversation) resetCustomerOrderSession(phone, { quiet: true });
   const outcome = await produceReply({
     phone, displayName: chat?.name, text, history, isNewConversation, notify: notifyAdvisor, resume: true,
   });

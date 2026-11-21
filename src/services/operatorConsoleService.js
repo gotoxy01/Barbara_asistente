@@ -14,7 +14,7 @@ import {
 } from './orderService.js';
 import {
   clearEditingTicket,
-  createTicket,
+  upsertOpenTicket,
   getEditingTicket,
   getTicket,
   setEditingTicket,
@@ -136,7 +136,8 @@ export async function solicitarAprobacionRapida({
   montoTotalBs = null,
   motivo = 'pesaje',
 }) {
-  const ticket = createTicket({
+  // Una nota por chat+motivo: no acumular fichas mezcladas de distintos pedidos/clientes.
+  const ticket = upsertOpenTicket({
     clienteTelefono: phone,
     clienteNombre: name || null,
     items,
@@ -238,7 +239,7 @@ async function handleNoStock(ticket) {
   const pending = pendingWeighItems(db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
   if (pending.length) {
     const bcv = await getBcvRate();
-    const result = applyNotAvailable(ticket.clienteTelefono, bcv);
+    const result = applyNotAvailable(ticket.clienteTelefono, bcv, { ticketItems: ticket.items });
     if (!result.error) {
       await sendToCustomer(ticket, result.message);
       await replyOperator(`❌ Notificado sin stock a ${labelCliente(ticket)}`);
@@ -278,7 +279,9 @@ async function handleEditText(ticket, operatorText) {
   let mensaje;
   if (looksLikePriceOnly && usd > 0) {
     const { applyWeighedPrice } = await import('./orderService.js');
-    const result = applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate());
+    const result = applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate(), {
+      ticketItems: ticket.items,
+    });
     if (result.error) {
       await replyOperator(`❌ ${result.error}`);
       return { ok: false };

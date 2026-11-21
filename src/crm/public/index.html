@@ -3,89 +3,97 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Bloc · Los Cuchos</title>
+  <title>Cocina · Los Cuchos</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="app">
-    <aside class="notes-rail">
-      <header class="inbox-head">
+  <div class="game">
+    <header class="hud">
+      <div class="logo">
+        <span class="logo-mark">🛒</span>
         <div>
-          <h1>Bloc de notas</h1>
-          <p class="sub">Solo lo que falta en caja</p>
+          <strong>Los Cuchos</strong>
+          <p>Cocina · últimas 24 h</p>
         </div>
-        <span id="noteCount" class="count">0</span>
-      </header>
-      <div id="noteList" class="note-list">
-        <p class="empty tiny">Sin notas pendientes.</p>
       </div>
-      <footer class="inbox-foot">
-        <span id="status">Cargando…</span>
-        <button type="button" id="btnRefresh" class="linkish">Actualizar</button>
-      </footer>
-    </aside>
+      <div class="hud-stats">
+        <div class="stat wait"><span id="statWait">0</span><small>Pendientes</small></div>
+        <div class="stat open"><span id="statOpen">0</span><small>Abiertos</small></div>
+        <div class="stat caja"><span id="statCaja">0</span><small>Caja</small></div>
+        <div class="stat done"><span id="statDone">0</span><small>Realizados</small></div>
+      </div>
+      <button type="button" id="btnRefresh" class="btn-hud">↻ Actualizar</button>
+    </header>
 
-    <section class="note-pane">
-      <header class="pane-head">
-        <div>
-          <strong id="noteTitle">Seleccione una nota</strong>
-          <div id="noteMeta" class="sub"></div>
+    <section class="rail-wrap">
+      <h2 class="rail-title">🔥 En cocina</h2>
+      <div class="rail-bar"></div>
+      <div id="ticketRail" class="ticket-rail" aria-label="Comandas activas"></div>
+      <p id="railEmpty" class="rail-empty" hidden>No hay pedidos ni notas de caja ahora. ¡Todo al día! 🎉</p>
+    </section>
+
+    <section class="rail-wrap done-rail">
+      <h2 class="rail-title">✅ Realizados <span id="doneHint" class="rail-hint">hechos y cancelados · puede borrarlos</span></h2>
+      <div class="rail-bar rail-bar-done"></div>
+      <div id="doneRail" class="ticket-rail" aria-label="Pedidos realizados"></div>
+      <p id="doneEmpty" class="rail-empty soft">Todavía no hay pedidos realizados.</p>
+    </section>
+
+    <section class="workbench">
+      <div id="benchEmpty" class="bench-empty">
+        <div class="hint-card">
+          <p class="big">👆 Toque una comanda de arriba</p>
+          <p>Arriba = en cocina · Abajo = realizados (borrar cuando quiera)</p>
         </div>
-        <div class="head-actions">
-          <button type="button" id="btnOrders" class="chip">Pedidos</button>
-          <button type="button" id="btnToggleChats" class="chip">Chats</button>
+      </div>
+
+      <div id="bench" class="bench" hidden>
+        <div class="bench-left">
+          <div id="focusTicket" class="ticket focus"></div>
         </div>
-      </header>
+        <div class="bench-right">
+          <div class="panel">
+            <h2 id="panelTitle">Pedido</h2>
+            <p id="panelMeta" class="meta"></p>
+            <p id="panelAddress" class="address" hidden></p>
+            <p id="panelTotal" class="total"></p>
 
-      <div id="noteEmpty" class="empty pad">Cuando Bárbara necesite pesaje, flete o validar un pago, aparece aquí como nota numerada.</div>
+            <div class="prep-block">
+              <h3>🧾 Para preparar</h3>
+              <ul id="prepList" class="prep-list"></ul>
+            </div>
 
-      <div id="noteBody" class="note-body" hidden>
-        <div class="req-block">
-          <h2>Requerimiento</h2>
-          <div id="reqText" class="req-text"></div>
-          <ul id="reqItems" class="req-items"></ul>
-        </div>
+            <div id="itemActions" class="item-actions"></div>
 
-        <div class="action-block" id="actionBlock"></div>
+            <div class="big-actions" id="bigActions"></div>
+          </div>
 
-        <div class="preview-block">
-          <h2>Producto final (vista previa)</h2>
-          <pre id="previewBox" class="preview-box">Escriba el precio para ver el mensaje que recibirá el cliente.</pre>
-          <div id="previewTotal" class="preview-total"></div>
+          <div class="panel chat-panel">
+            <h2 id="chatTitle">💬 Hablar con el cliente</h2>
+            <p id="chatMeta" class="meta"></p>
+            <div id="messages" class="messages"></div>
+            <form id="replyForm" class="composer">
+              <input id="replyText" type="text" placeholder="Escriba aquí y pulse Enviar" required autocomplete="off" />
+              <button type="submit" class="btn-send">Enviar</button>
+            </form>
+          </div>
         </div>
       </div>
     </section>
 
-    <aside class="inbox" id="chatsPanel" hidden>
-      <header class="inbox-head">
-        <div>
-          <h1>Chats</h1>
-          <p class="sub">WhatsApp</p>
-        </div>
-      </header>
-      <div id="chatList" class="inbox-list"></div>
-      <div class="chat-side">
-        <header class="pane-head tight">
-          <div>
-            <strong id="threadName">Chat</strong>
-            <div id="threadMeta" class="sub"></div>
-          </div>
-        </header>
-        <div id="messages" class="thread"></div>
-        <form id="replyForm" class="composer" hidden>
-          <textarea id="replyText" rows="2" placeholder="Responder al cliente…" required></textarea>
-          <button type="submit" class="send">Enviar</button>
-        </form>
-      </div>
-    </aside>
+    <div id="toast" class="toast" hidden></div>
   </div>
 
-  <dialog id="ordersDialog">
-    <form method="dialog" class="dialog-bar">
-      <strong>Pedidos de hoy</strong>
-      <button value="close" class="linkish">Cerrar</button>
+  <dialog id="priceDialog">
+    <form method="dialog" class="price-form">
+      <h3 id="priceTitle">¿Cuánto cuesta?</h3>
+      <p id="priceHint" class="meta">Escriba el precio en dólares</p>
+      <input id="priceInput" type="number" min="0.01" step="0.01" placeholder="Ej: 1.50" required />
+      <div class="price-btns">
+        <button value="cancel" class="btn-ghost">Volver</button>
+        <button value="ok" class="btn-go" id="priceOk">Poner precio ✅</button>
+      </div>
     </form>
-    <div id="orderList" class="orders"></div>
   </dialog>
 
   <script src="/app.js" type="module"></script>
