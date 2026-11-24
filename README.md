@@ -60,7 +60,24 @@ npm run migrate:sqlite
 
 Al arrancar también abre el panel en `http://127.0.0.1:3847` y reintenta, durante la última hora, los mensajes que Gemini no pudo contestar.
 
-Si el catálogo en uso es `data/products.json`, la consola avisa en grande: esos precios son de prueba, no los de la caja. Copie `database.db` o defina `CATALOG_DB_PATH`.
+Si el catálogo en uso es `data/products.json`, la consola avisa en grande: esos precios son de prueba, no los de la caja.
+
+Para probar con una caja de demostración (unas 500 referencias, el mismo esquema que lee Bárbara):
+
+```powershell
+npm run caja:demo
+```
+
+En `.env`:
+
+```
+CATALOG_SOURCE=db
+CATALOG_DB_PATH=data/caja-demo/database.db
+```
+
+En Windows también vale `CATALOG_DB_PATH=data\caja-demo\database.db`, o la ruta completa, por ejemplo `C:\Users\Roni\Barbara_asistente\data\caja-demo\database.db`. `DELIVERY_ITEM_NAME` puede quedarse en `Delivery costo`. El archivo `.db` no se sube a git; se vuelve a crear con el mismo comando.
+
+`npm run sync` lee esa caja, dice cuántos productos entran y, si hay `DATABASE_URL`, los copia a Postgres. Los de stock 0, sin precio o con el nombre hecho solo de números no entran: así los filtra la caja de verdad.
 
 ## 3. Cómo atiende
 
