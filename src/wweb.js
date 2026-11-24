@@ -4,22 +4,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import qrcode from 'qrcode-terminal';
 import wweb from 'whatsapp-web.js';
-import { assertGeminiConfig, config } from './config.js';
+import { assertBusinessConfig, assertGeminiConfig, config } from './config.js';
 import * as db from './db.js';
 import { setChannel, setSelfPhone, setSender } from './messenger.js';
-import { enqueue } from './queue.js';
+import { createInboundQueue, enqueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
-import { getCatalogInfo } from './services/catalogService.js';
+import { warnIfDemoCatalog } from './services/catalogService.js';
 import { startCrmServer } from './crm/server.js';
 import { info, verbose, warn } from './log.js';
-import { handleCustomerMessage, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
+import { completeCustomerTurn, handleCustomerMessage, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
 import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
 
 const { Client, LocalAuth } = wweb;
 
 assertGeminiConfig();
+assertBusinessConfig();
 migrateLegacySession();
 
 // El buzón CRM abre de una vez (no espera a que WhatsApp termine de conectar).
@@ -170,6 +171,11 @@ async function getChatSafe(phone, chatId) {
 
 setChannel('wweb');
 setSender((phone, text) => sendToPhone(phone, text));
+
+const inbound = createInboundQueue({
+  windowMs: config.debounceWindowMs,
+  onFlush: (phone, items) => processCustomerBatch(phone, items),
+});
 // wweb no envía interactive Cloud API: messenger hace fallback a texto con payloads APPROVE_T-…
 
 // ---------------------------------------------------------------------------
@@ -220,37 +226,60 @@ async function messageToText(msg) {
  * @param {{ groupName?: string, chatId?: string }} [options] groupName: el mensaje se escribió en ese grupo;
  *   chatId: chat PRIVADO donde se responde (en grupos, el del autor; nunca el del grupo).
  */
-async function processIncoming(msg, phone, { groupName, chatId = msg.from } = {}) {
-  if (!db.markProcessed(messageKey(msg))) return;
-
-  const chat = await getChatSafe(phone, chatId);
-  if (!groupName) chat?.sendSeen().catch(() => {});
-
-  if (!groupName && config.advisorPhone && phone === config.advisorPhone) {
+async function processAdvisorMessage(msg, phone, id) {
+  try {
     const buttonId = msg.selectedButtonId || msg._data?.selectedButtonId || null;
-    if (await tryHandleOperatorInbound({ buttonId, text: msg.body, body: msg.body })) return;
-    if (msg.type === 'chat' && await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) return;
+    if (await tryHandleOperatorInbound({ buttonId, text: msg.body, body: msg.body })) {
+      db.markProcessed(id);
+      return;
+    }
+    if (msg.type === 'chat' && await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) {
+      db.markProcessed(id);
+      return;
+    }
+    await processCustomerBatch(phone, [{ id, msg, phone, chatId: msg.from }]);
+  } catch (err) {
+    console.error(`[${phone}]`, err.message ?? err);
   }
+}
 
-  let text = await messageToText(msg);
-  if (!text) return;
-  if (groupName) text = `[Mensaje escrito en el grupo "${groupName}"; respóndele por privado] ${text}`;
-  chat?.sendStateTyping().catch(() => {});
+async function processCustomerBatch(phone, items) {
+  const fresh = items.filter((item) => item.id && !db.isDuplicateEvent(item.id));
+  if (!fresh.length) return;
+  const last = fresh.at(-1);
+  const chat = await getChatSafe(phone, last.chatId);
+  if (!last.groupName) chat?.sendSeen().catch(() => {});
 
-  const name = msg._data?.notifyName || (await msg.getContact().catch(() => null))?.pushname;
-  const who = name || `+${phone}`;
-  // Buzón limpio en consola: una sola línea por mensaje del cliente (sin volcar la respuesta de Bárbara).
-  info(`📩 ${who}${groupName ? ` · grupo` : ''}: ${text.replace(/\s+/g, ' ').trim().slice(0, 100)}`);
-  const result = await handleCustomerMessage({ phone, name, text });
-
-  if (result.paused && !result.reply) {
-    verbose(`[${phone}] Chat pausado: Bárbara no responde.`);
+  try {
+    const texts = [];
+    let name = last.name;
+    for (const item of fresh) {
+      let text = await messageToText(item.msg);
+      if (!text) continue;
+      if (item.groupName) text = `[Mensaje escrito en el grupo "${item.groupName}"; respóndele por privado] ${text}`;
+      texts.push(text);
+      name = item.msg._data?.notifyName
+        || (await item.msg.getContact().catch(() => null))?.pushname
+        || name;
+    }
+    if (!texts.length) {
+      fresh.forEach((item) => db.markProcessed(item.id));
+      return;
+    }
+    chat?.sendStateTyping().catch(() => {});
+    const text = texts.join('\n');
+    const who = name || `+${phone}`;
+    info(`📩 ${who}${last.groupName ? ' · grupo' : ''}: ${text.replace(/\s+/g, ' ').trim().slice(0, 100)}`);
+    const result = await handleCustomerMessage({ phone, name, text, wamid: fresh[0].id });
+    await completeCustomerTurn(phone, result);
+    if (result.paused && !result.reply) verbose(`[${phone}] Chat pausado: Bárbara no responde.`);
+    if (result.reply) verbose(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
+    fresh.forEach((item) => db.markProcessed(item.id));
+  } catch (err) {
+    console.error(`[${phone}] No se completó el turno:`, err.message ?? err);
+  } finally {
+    chat?.clearState().catch(() => {});
   }
-  if (result.reply) {
-    await sendToPhone(phone, result.reply, chatId);
-    verbose(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
-  }
-  chat?.clearState().catch(() => {});
 }
 
 function debugEvent(event, msg) {
@@ -267,7 +296,13 @@ async function handleGroupMessage(msg) {
   const author = serializeId(msg.author);
   const phone = await resolvePhone(author);
   if (!phone || phone === getOwnPhone() || phone === config.advisorPhone) return;
-  enqueue(phone, () => processIncoming(msg, phone, { groupName, chatId: author }));
+  const id = messageKey(msg);
+  if (!id) {
+    console.warn('Mensaje de grupo sin id; omitido');
+    return;
+  }
+  if (db.isDuplicateEvent(id)) return;
+  inbound.push(phone, { id, msg, phone, chatId: author, groupName });
 }
 
 client.on('message', async (msg) => {
@@ -280,7 +315,17 @@ client.on('message', async (msg) => {
   if (isOlderThanCatchup(msg)) return;
   const phone = await resolvePhone(msg.from);
   chatIdByPhone.set(phone, msg.from);
-  enqueue(phone, () => processIncoming(msg, phone));
+  const id = messageKey(msg);
+  if (!id) {
+    console.warn('Mensaje sin id; omitido');
+    return;
+  }
+  if (db.isDuplicateEvent(id)) return;
+  if (config.advisorPhone && phone === config.advisorPhone) {
+    enqueue(phone, () => processAdvisorMessage(msg, phone, id));
+    return;
+  }
+  inbound.push(phone, { id, msg, phone, chatId: msg.from });
 });
 
 // ---------------------------------------------------------------------------
@@ -356,16 +401,10 @@ client.on('auth_failure', (m) => console.error('Falló la autenticación de What
 
 client.on('ready', async () => {
   setSelfPhone(getOwnPhone());
-  const catalog = getCatalogInfo();
+  const catalog = warnIfDemoCatalog();
   const bcv = await getBcvRate();
-  console.log(`\n✅ Bárbara conectada a WhatsApp como +${getOwnPhone()}`);
+  console.log(`\n✅ Bárbara conectada a WhatsApp como +${getOwnPhone()} (respaldo QR)`);
   console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
-  if (catalog.source.startsWith('json')) {
-    console.warn(
-      '⚠️ ATENCIÓN: Bárbara está usando el catálogo de PRUEBA (data/products.json), no el inventario real de la caja.\n' +
-      '   Copie el archivo database.db a la carpeta del proyecto (git no lo copia) o configure CATALOG_DB_PATH en .env.',
-    );
-  }
   if (watchedGroups.length) console.log(`Grupos atendidos por privado: ${config.wweb.groupNames.join(', ')}`);
   console.log(catalog.deliveryFromCatalog
     ? `Delivery: $ ${catalog.deliveryUsd.toFixed(2)} por pedido (artículo "${config.delivery.itemName}" de la caja)`

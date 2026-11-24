@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "description": "Bárbara, asistente virtual de WhatsApp de Abasto Los Cuchos",
   "type": "module",
-  "main": "src/wweb.js",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node src/wweb.js",
+    "start": "node src/server.js",
     "start:cloud": "node src/server.js",
+    "start:qr": "node src/wweb.js",
     "chat": "node scripts/chat.js",
-    "check": "node scripts/check-gemini.js"
+    "check": "node scripts/check-gemini.js",
+    "test": "node --test ./test/*.test.js"
   },
   "engines": {
     "node": ">=22.13"

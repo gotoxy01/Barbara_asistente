@@ -25,7 +25,10 @@ try {
 }
 
 try {
-  const { text } = await generateBarbaraReply('Eres un asistente de prueba.', [{ role: 'user', content: 'Responde solo: OK' }]);
+  const { text } = await generateBarbaraReply(
+    'Responde solo el JSON de ventas. respuesta_cliente debe ser exactamente OK. confianza_porcentaje 100. requiere_especialista false. producto_identificado null. sku null. motivo_escalado null.',
+    [{ role: 'user', content: 'hola' }],
+  );
   console.log(`3) Generación de respuesta: ✅ ("${text}")\n\nTodo listo: Bárbara puede responder.`);
 } catch (err) {
   console.log(`3) Generación de respuesta: ❌ [${err.kind ?? '?'} ${err.status ?? ''}]\n   ${err.hint ?? err.message}`);

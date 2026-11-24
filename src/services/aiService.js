@@ -194,13 +194,16 @@ async function withRetries(fn, turn) {
 }
 
 async function callGemini(model, systemPrompt, contents, tools) {
+  const withTools = Boolean(tools?.declarations?.length);
   return getClient().models.generateContent({
     model,
     contents,
     config: {
       systemInstruction: systemPrompt,
       temperature: 0.3,
-      ...(tools?.declarations?.length ? { tools: [{ functionDeclarations: tools.declarations }] } : {}),
+      ...(withTools
+        ? { tools: [{ functionDeclarations: tools.declarations }] }
+        : { responseMimeType: 'application/json' }),
     },
   });
 }
@@ -262,10 +265,20 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
         throw new GeminiError(`Gemini devolvió una respuesta vacía (finishReason: ${reason})`, {
           kind: 'empty', retryable: false, hint: 'Gemini devolvió una respuesta vacía.' });
       }
+      const parsed = parseSalesJson(raw);
+      if (!parsed) {
+        throw new GeminiError('Gemini no devolvió el JSON de ventas', {
+          kind: 'empty', retryable: false, hint: 'La respuesta no trae el JSON con respuesta_cliente y confianza_porcentaje.',
+        });
+      }
       return {
-        text: raw.split(ESCALATION_TAG).join('').split(IGNORE_TAG).join('').replace(/\n{3,}/g, '\n\n').trim(),
-        escalate: raw.includes(ESCALATION_TAG),
-        ignore: raw.includes(IGNORE_TAG),
+        text: parsed.respuesta_cliente,
+        escalate: parsed.requiere_especialista || raw.includes(ESCALATION_TAG),
+        ignore: parsed.ignore || (raw.includes(IGNORE_TAG) && !parsed.respuesta_cliente),
+        confianza: parsed.confianza_porcentaje,
+        producto: parsed.producto_identificado,
+        sku: parsed.sku,
+        motivo: parsed.motivo_escalado,
         model: turn.model,
         toolCalls,
       };
@@ -283,13 +296,62 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
     toolCalls.push(...roundCalls);
 
     const finalText = tools.finalize?.(roundCalls);
-    if (finalText) return { text: finalText, escalate: false, model: turn.model, toolCalls };
+    if (finalText) {
+      return {
+        text: finalText,
+        escalate: false,
+        ignore: false,
+        confianza: 100,
+        producto: null,
+        sku: null,
+        motivo: null,
+        model: turn.model,
+        toolCalls,
+      };
+    }
 
     contents.push({ role: 'user', parts: responses });
   }
 
   throw new GeminiError('Demasiadas llamadas a herramientas en un solo turno', {
     kind: 'unknown', retryable: false, hint: 'La IA entró en un ciclo de herramientas.' });
+}
+
+/**
+ * JSON de ventas que debe devolver el modelo antes de hablarle al cliente.
+ * @returns {null | {
+ *   producto_identificado: string|null,
+ *   sku: string|null,
+ *   confianza_porcentaje: number,
+ *   requiere_especialista: boolean,
+ *   motivo_escalado: string|null,
+ *   respuesta_cliente: string,
+ *   ignore: boolean,
+ * }}
+ */
+export function parseSalesJson(raw) {
+  const obj = extractJsonObject(raw);
+  if (!obj || !Object.prototype.hasOwnProperty.call(obj, 'respuesta_cliente')) return null;
+  const respuesta = String(obj.respuesta_cliente ?? '')
+    .split(ESCALATION_TAG).join('')
+    .split(IGNORE_TAG).join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const confianza = Number(obj.confianza_porcentaje);
+  const motivo = obj.motivo_escalado == null || obj.motivo_escalado === 'null'
+    ? null
+    : String(obj.motivo_escalado);
+  return {
+    producto_identificado: obj.producto_identificado == null || obj.producto_identificado === 'null'
+      ? null
+      : String(obj.producto_identificado),
+    sku: obj.sku == null || obj.sku === 'null' ? null : String(obj.sku),
+    confianza_porcentaje: Number.isFinite(confianza) ? confianza : 0,
+    requiere_especialista: obj.requiere_especialista === true || obj.requiere_especialista === 'true',
+    motivo_escalado: motivo,
+    respuesta_cliente: respuesta,
+    ignore: String(motivo || '').toLowerCase() === 'ajeno' && !respuesta,
+  };
 }
 
 function extractJsonObject(raw) {

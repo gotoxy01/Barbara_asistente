@@ -12,6 +12,8 @@ echo.
 echo  ==================================================
 echo.
 echo  Carpeta: %cd%
+echo  Modo: WhatsApp Cloud API  ^(npm start^)
+echo  Respaldo con codigo QR: npm run start:qr
 echo  Para detener a Bárbara presione Ctrl+C.
 echo.
 

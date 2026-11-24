@@ -409,6 +409,22 @@ export function getCatalogInfo() {
   };
 }
 
+/** Aviso visible cuando no está el inventario de la caja. */
+export function warnIfDemoCatalog() {
+  const info = getCatalogInfo();
+  if (String(info.source).startsWith('json')) {
+    console.warn([
+      '',
+      '================================================================',
+      'ATENCIÓN: Bárbara está usando el catálogo de PRUEBA (data/products.json), no el inventario real de la caja.',
+      'Los precios NO son los de la tienda hasta copiar database.db a la carpeta del proyecto o definir CATALOG_DB_PATH.',
+      '================================================================',
+      '',
+    ].join('\n'));
+  }
+  return info;
+}
+
 // ---------------------------------------------------------------------------
 // Búsqueda
 // ---------------------------------------------------------------------------

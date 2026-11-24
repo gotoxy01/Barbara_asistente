@@ -2,12 +2,13 @@
 // Uso: npm run chat   (escriba "salir" para terminar, "reanudar" si el chat quedó escalado)
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { assertGeminiConfig } from '../src/config.js';
-import { resumeChat } from '../src/db.js';
+import { assertBusinessConfig, assertGeminiConfig } from '../src/config.js';
+import { addMessage, resumeChat } from '../src/db.js';
 import { getCatalogInfo } from '../src/services/catalogService.js';
-import { handleCustomerMessage } from '../src/services/chatService.js';
+import { finalizeHandoff, handleCustomerMessage } from '../src/services/chatService.js';
 
 assertGeminiConfig();
+assertBusinessConfig();
 
 const phone = process.env.TEST_PHONE || '580000000000';
 const name = process.env.TEST_NAME || 'Cliente de Prueba';
@@ -37,8 +38,14 @@ while (true) {
   for (const call of result.toolCalls ?? []) {
     console.log(`  ⚙ ${call.name}(${JSON.stringify(call.args)}) → ${JSON.stringify(call.result).slice(0, 160)}`);
   }
-  if (result.reply) console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
-  if (result.escalated) console.log('>>> [ESCALADO A HUMANO] Escriba "reanudar" para seguir probando.\n');
+  if (result.reply) {
+    console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
+    addMessage(phone, 'model', result.historyText || result.reply);
+  }
+  if (result.escalated && result.handoff) {
+    await finalizeHandoff({ phone, name, handoff: result.handoff, notify: printNotice });
+    console.log('>>> [ESPECIALISTA] Escriba "reanudar" para seguir probando.\n');
+  }
   else if (result.paused) console.log('(Chat pausado: un asesor lo atiende. Escriba "reanudar" para reactivar a Bárbara.)\n');
 }
 

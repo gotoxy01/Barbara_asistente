@@ -1,8 +1,10 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { info, verbose, error as logError } from '../log.js';
-import { getSelfPhone, sendMessage } from '../messenger.js';
+import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
+import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
+import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
 import { searchProducts } from './catalogService.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
@@ -32,8 +34,6 @@ const THREAD_FOLLOW_MSGS = 4;
 
 const WAITING_WEIGHT_REPLY =
   '¡Claro! Déjeme pesarlo aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️';
-
-const ATTACHMENT_RE = /^\[El cliente adjuntó (una imagen|un documento)/;
 
 const INTRO = 'Le saluda *Bárbara*, asistente virtual de *Abasto Los Cuchos*. 🙏';
 
@@ -104,10 +104,15 @@ function kindLabel(kind) {
 }
 
 function isPauseExpired(chat) {
+  if (!chat) return false;
+  if (chat.status === 'SPECIALIST') {
+    const hours = config.specialistAutoResumeHours;
+    if (!(hours > 0) || !chat.paused_at) return false;
+    return Date.now() - chat.paused_at >= hours * 3600 * 1000;
+  }
   if (!chat.paused) return false;
   if (chat.paused_until) return Date.now() >= chat.paused_until;
-  if (!chat.paused_at || config.pauseHours <= 0) return false;
-  return Date.now() - chat.paused_at > config.pauseHours * 3600 * 1000;
+  return false;
 }
 
 const GROUP_PREFIX_RE = /^\[Mensaje escrito en el grupo [^\]]*\]\s*/;
@@ -281,12 +286,13 @@ function buildProductContext(history, bcv) {
   return result;
 }
 
-function escalationNotice({ name, phone, text }) {
-  return (
-    `Cliente: ${name || 'Sin nombre'} (+${phone})\n` +
-    `Último mensaje: "${text}"\n` +
-    'Bárbara quedó pausada. Responda desde el CRM o con #r.'
-  );
+function conversationSummary(phone) {
+  return db.getHistory(phone)
+    .slice(-6)
+    .map((m) => `${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${cleanMsgContent(m.content)}`)
+    .filter((line) => !line.endsWith(':'))
+    .join('\n')
+    .slice(0, 1200);
 }
 
 /**
@@ -300,8 +306,10 @@ export function handleCustomerMessage(message, options) {
   return lockPhone(message.phone, () => handleCustomerMessageNow(message, options));
 }
 
-async function handleCustomerMessageNow({ phone, name, text }, { notify = notifyAdvisor } = {}) {
+async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor } = {}) {
   let chat = db.upsertChat(phone, name);
+  db.touchCustomerWindow(phone);
+  chat = db.getChat(phone);
   if (isPauseExpired(chat)) {
     db.resumeChat(phone);
     chat = db.getChat(phone);
@@ -309,21 +317,28 @@ async function handleCustomerMessageNow({ phone, name, text }, { notify = notify
 
   const lastReplyAt = db.getLastModelMessageAt(phone);
   const isNewConversation = !lastReplyAt || Date.now() - lastReplyAt > config.newConversationHours * 3600 * 1000;
-  db.addMessage(phone, 'user', text);
+  const alreadyStored = wamid && db.hasInbound(wamid);
+  if (alreadyStored) {
+    const latest = db.getLatestMessage(phone);
+    if (latest?.role === 'model') return { reply: null, escalated: false, paused: false, duplicate: true };
+  } else {
+    db.addMessage(phone, 'user', text, wamid);
+  }
   const displayName = chat.name || name;
 
-  if (chat.paused) {
+  if (chat.status === 'SPECIALIST' || chat.paused) {
+    const modo = chat.status === 'SPECIALIST' ? 'en modo especialista' : 'pausado';
     await notify(
-      `${displayName || '+' + phone} (+${phone}) escribió con el chat pausado:\n"${text}"\n\nResponda desde el CRM.`,
-      { kind: 'paused', phone, title: 'Mensaje en chat pausado', whatsapp: false },
+      `${displayName || '+' + phone} (+${phone}) escribió con el chat ${modo}:\n"${text}"\n\nResponda desde el CRM. En especialista, use #reanudar para que Bárbara vuelva.`,
+      { kind: 'paused', phone, title: chat.status === 'SPECIALIST' ? 'Mensaje para el especialista' : 'Mensaje en chat pausado', whatsapp: false },
     );
     return { reply: null, escalated: false, paused: true };
   }
 
-  if (ATTACHMENT_RE.test(text)) {
-    const order = db.getActiveOrder(phone);
-    const note = order
-      ? `Pedido #${order.id} (${order.status})${order.total_bs ? ` · Bs. ${order.total_bs.toFixed(2)}` : ''}`
+  const payOrder = db.getActiveOrder(phone);
+  if (shouldOpenPaymentTicket({ text, history: db.getHistory(phone), order: payOrder })) {
+    const note = payOrder
+      ? `Pedido #${payOrder.id} (${payOrder.status})${payOrder.total_bs ? ` · Bs. ${payOrder.total_bs.toFixed(2)}` : ''}`
       : text.slice(0, 80);
     await abrirTicketPago({ phone, name: displayName, note });
   }
@@ -376,22 +391,47 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let escalated;
   let toolCalls;
   let model;
+  let salesMeta = null;
   const pendingBefore = pendingWeighItems(db.getActiveOrder(phone)?.items ?? []).length;
   try {
     const result = await generateBarbaraReply(systemPrompt, scopedHistory, tools);
-    if (result.ignore && !tools.state.cartChanged && !isGreeting(text)) {
+    const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
+    const decision = decideEscalation({
+      confianza: result.confianza ?? 0,
+      requiereEspecialista: result.escalate,
+      motivoEscalado: result.motivo,
+      customerText: text,
+      catalogType: products.type,
+      catalogTerms: products.terms,
+      threshold: config.confidenceThreshold,
+      cartCommitted,
+    });
+    if ((result.ignore || decision.ignore) && !tools.state.cartChanged && !isGreeting(text)) {
       verbose(`[${phone}] Mensaje ajeno a la bodega: Bárbara no responde.`);
       if (resume) db.addMessage(phone, 'model', SILENT_MARK);
       return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
     }
-    if (!result.ignore && pendingBefore === 0) await ensureHandOff(result.text, customerText, tools);
-    reply = result.ignore && !tools.state.cartChanged
-      ? greetingReply(text, isNewConversation)
-      : enforceBusinessName(stripPrematurePaymentPitch(applyOrderFlow(result.text, tools.state), tools.state)) || EMPTY_ESCALATION_REPLY;
-    if (isNewConversation && !/b[aá]rbara/i.test(reply)) reply = `${INTRO}\n\n${reply}`;
-    escalated = result.escalate;
+    if (!decision.escalate && !result.ignore && !decision.ignore && !forcedHandoffReason(text) && pendingBefore === 0) {
+      await ensureHandOff(result.text, customerText, tools);
+    }
+    if (decision.escalate) {
+      reply = enforceBusinessName(replyForEscalation(result.text));
+      escalated = true;
+    } else {
+      reply = result.ignore && !tools.state.cartChanged
+        ? greetingReply(text, isNewConversation)
+        : enforceBusinessName(stripPrematurePaymentPitch(applyOrderFlow(result.text, tools.state), tools.state)) || EMPTY_ESCALATION_REPLY;
+      if (isNewConversation && !/b[aá]rbara/i.test(reply)) reply = `${INTRO}\n\n${reply}`;
+      escalated = false;
+    }
     toolCalls = result.toolCalls;
     model = result.model;
+    salesMeta = {
+      producto: result.producto || null,
+      sku: result.sku || null,
+      motivo: decision.reason,
+      confianza: decision.confianza,
+    };
   } catch (error) {
     if (!isGreeting(text)) {
       const failed = await handleAiFailure({ phone, name: displayName, text, error, notify, productContext, resume });
@@ -405,7 +445,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     reply = `${RESUME_NOTE}\n\n${reply}`;
   }
 
-  if (reply && shouldAuditReply(reply, tools?.state)) {
+  if (reply && !escalated && shouldAuditReply(reply, tools?.state)) {
     const orderContext = renderOrderContext(phone, bcv);
     const audited = await runAuditor({
       phone,
@@ -418,7 +458,19 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     if (audited) reply = audited;
   }
 
-  return { reply, escalated, paused: false, productContext, toolCalls, model, tools };
+  return {
+    reply,
+    escalated,
+    paused: false,
+    productContext,
+    toolCalls,
+    model,
+    tools,
+    producto: salesMeta?.producto ?? null,
+    sku: salesMeta?.sku ?? null,
+    motivo: salesMeta?.motivo ?? null,
+    confianza: salesMeta?.confianza ?? null,
+  };
 }
 
 /** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
@@ -502,33 +554,72 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
   }
 
   // Historial: guardar marca de cancelación; WhatsApp: sin la marca.
+  // El guardado ocurre después de que WhatsApp confirme el envío (completeCustomerTurn).
   if (reply && tools?.state?.canceled && !reply.includes(CANCEL_MARKER)) {
     reply = `${reply.trim()}\n${CANCEL_MARKER}`;
   }
-  if (reply) db.addMessage(phone, 'model', reply);
+  const historyText = reply;
   const forCustomer = reply
     ? reply.split(CANCEL_MARKER).join('').replace(/\n{3,}/g, '\n\n').trim()
     : null;
 
-  if (escalated) {
-    db.pauseChat(phone);
-    await notify(escalationNotice({ name: displayName, phone, text }), {
-      kind: 'escalate', phone, title: 'Chat escalado', whatsapp: false,
-    });
-    await notifyAdvisor(
-      `🚨 Escalado · +${phone}${displayName ? ` · ${displayName}` : ''}\nResponda en el CRM`,
-      { kind: 'escalate', phone, whatsapp: true, skipCrm: true },
-    );
-  }
+  const handoff = escalated ? {
+    name: displayName || null,
+    producto: outcome.producto || null,
+    sku: outcome.sku || null,
+    motivo: outcome.motivo || 'Escalado a especialista',
+    confianza: outcome.confianza,
+    summary: conversationSummary(phone),
+  } : null;
 
   return {
     reply: forCustomer,
+    historyText,
     escalated,
+    handoff,
     paused: outcome.paused || escalated,
     productContext: outcome.productContext,
     toolCalls: outcome.toolCalls,
     model: outcome.model,
   };
+}
+
+/**
+ * Envía la respuesta y, solo si WhatsApp la acepta, la guarda y aplica el pase a especialista.
+ */
+export async function completeCustomerTurn(phone, result) {
+  if (result?.reply) {
+    const sent = await sendMessage(phone, result.reply);
+    let stored = outboundRecord(sent, result.historyText || result.reply);
+    if (result.historyText?.includes(CANCEL_MARKER) && !stored.includes(CANCEL_MARKER)) {
+      stored = `${stored}\n${CANCEL_MARKER}`;
+    }
+    db.addMessage(phone, 'model', stored);
+  }
+  if (result?.escalated && result.handoff) {
+    await finalizeHandoff({ phone, name: result.handoff.name, handoff: result.handoff });
+  }
+  return result;
+}
+
+/** Deja el chat en SPECIALIST y avisa al asesor con el resumen del caso. */
+export async function finalizeHandoff({ phone, name, handoff, notify = notifyAdvisor }) {
+  db.setSpecialist(phone);
+  const body = [
+    `Cliente: ${name || 'Sin nombre'} (+${phone})`,
+    `Producto tentativo: ${handoff?.producto || 'no identificado'}${handoff?.sku ? ` · SKU ${handoff.sku}` : ''}`,
+    `Motivo: ${handoff?.motivo || 'sin detalle'}`,
+    handoff?.confianza != null ? `Confianza: ${handoff.confianza}%` : null,
+    `Resumen:\n${handoff?.summary || '(sin resumen)'}`,
+    'Bárbara quedó en modo especialista y no responderá hasta #reanudar.',
+  ].filter(Boolean).join('\n');
+  await notify(body, { kind: 'escalate', phone, title: 'Chat con especialista', whatsapp: false });
+  if (notify === notifyAdvisor) {
+    await notifyAdvisor(
+      `Escalado · +${phone}${name ? ` · ${name}` : ''}\n${handoff?.motivo || ''}\nReanude en el CRM o con #reanudar`,
+      { kind: 'escalate', phone, whatsapp: true, skipCrm: true },
+    );
+  }
 }
 
 /**
@@ -608,8 +699,8 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
   if (!resume && error.retryable) setTimeout(() => resumeOne(phone).catch((err) => logError(`[${phone}]`, err.message)), 45_000);
 
   if (config.pauseOnError) {
-    db.pauseChat(phone);
-    await notify(`${escalationNotice({ name, phone, text })}\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`, {
+    db.setSpecialist(phone);
+    await notify(`Cliente: ${name || 'Sin nombre'} (+${phone})\nÚltimo mensaje: "${text}"\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`, {
       kind: 'tech', phone, title: 'Falla técnica', whatsapp: false,
     });
     return { reply: FALLBACK_REPLY, escalated: false, paused: true, productContext, error };
@@ -662,10 +753,10 @@ async function resumeOneNow(phone) {
   const outcome = await produceReply({
     phone, displayName: chat?.name, text, history, isNewConversation, notify: notifyAdvisor, resume: true,
   });
-  const sent = await finishReply({ phone, displayName: chat?.name, text, notify: notifyAdvisor, outcome });
-  if (!sent.reply) return;
-  await sendMessage(phone, sent.reply);
-  info(`[${phone}] Conversación retomada${sent.model ? ` (${sent.model})` : ''}.`);
+  const finished = await finishReply({ phone, displayName: chat?.name, text, notify: notifyAdvisor, outcome });
+  if (!finished.reply && !finished.escalated) return;
+  await completeCustomerTurn(phone, finished);
+  if (finished.reply) info(`[${phone}] Conversación retomada${finished.model ? ` (${finished.model})` : ''}.`);
 }
 
 /** Responde lo pendiente de la última hora: avisos de inconveniente y mensajes que llegaron con Bárbara apagada. */

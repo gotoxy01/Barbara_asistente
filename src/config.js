@@ -26,14 +26,16 @@ export const config = {
   crm: {
     host: process.env.CRM_HOST || '127.0.0.1',
     port: Number(process.env.CRM_PORT || 3847),
-    token: process.env.CRM_TOKEN || 'barbara-crm',
+    token: process.env.CRM_TOKEN || '',
   },
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN || '',
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
     appSecret: process.env.WHATSAPP_APP_SECRET || '',
-    apiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
+    apiVersion: process.env.WHATSAPP_API_VERSION || 'v26.0',
+    templateName: process.env.WHATSAPP_TEMPLATE_NAME || '',
+    templateLang: process.env.WHATSAPP_TEMPLATE_LANG || 'es',
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
@@ -63,7 +65,13 @@ export const config = {
     whatsappPing: /^(1|true|si|sí|yes)$/i.test(process.env.OPERATOR_WA_PING || 'false'),
   },
   advisorPhone: (process.env.ADVISOR_PHONE || '').replace(/\D/g, ''),
+  // Horas para volver sola de SPECIALIST a BOT. 0 = se queda callada hasta #reanudar.
+  specialistAutoResumeHours: Number(process.env.SPECIALIST_AUTO_RESUME_HOURS ?? 0),
+  // Se conserva por compatibilidad; el pase a especialista ya no usa este plazo.
   pauseHours: Number(process.env.BOT_PAUSE_HOURS || 12),
+  confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 85),
+  debounceWindowMs: Number(process.env.DEBOUNCE_WINDOW_MS ?? 3500),
+  serviceWindowHours: Number(process.env.SERVICE_WINDOW_HOURS ?? 24),
   // Si es false, un error técnico de Gemini NO pausa el chat (el cliente puede reintentar)
   pauseOnError: /^(1|true|si|sí)$/i.test(process.env.PAUSE_ON_ERROR || 'false'),
   historyLimit: Number(process.env.HISTORY_LIMIT || 20),
@@ -78,9 +86,9 @@ export const config = {
     fallbackUsd: Number(process.env.DELIVERY_FALLBACK_USD || 1.5),
   },
   pagoMovil: {
-    telefono: process.env.PAGO_MOVIL_TELEFONO || '0414-3697834',
-    cedula: process.env.PAGO_MOVIL_CEDULA || '29953424',
-    banco: process.env.PAGO_MOVIL_BANCO || 'Banesco',
+    telefono: process.env.PAGO_MOVIL_TELEFONO || '',
+    cedula: process.env.PAGO_MOVIL_CEDULA || '',
+    banco: process.env.PAGO_MOVIL_BANCO || '',
   },
   // Minutos que Bárbara se queda callada en un chat cuando un asesor escribe a mano (luego se reactiva sola).
   manualPauseMinutes: Number(process.env.MANUAL_PAUSE_MINUTES || 5),
@@ -107,8 +115,18 @@ export function assertWhatsAppConfig() {
   required('WHATSAPP_TOKEN');
   required('WHATSAPP_PHONE_NUMBER_ID');
   required('WHATSAPP_VERIFY_TOKEN');
+  required('WHATSAPP_APP_SECRET');
+  required('WHATSAPP_TEMPLATE_NAME');
 }
 
 export function assertGeminiConfig() {
   required('GEMINI_API_KEY');
+}
+
+/** Datos del negocio que no pueden quedar escritos en el código. */
+export function assertBusinessConfig() {
+  required('PAGO_MOVIL_TELEFONO');
+  required('PAGO_MOVIL_CEDULA');
+  required('PAGO_MOVIL_BANCO');
+  required('CRM_TOKEN');
 }
