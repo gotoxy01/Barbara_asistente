@@ -30,10 +30,10 @@ function nowInVenezuela() {
   }).format(new Date());
 }
 
-export function greetingForNow() {
-  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: config.timezone, hour: 'numeric', hourCycle: 'h23' }).format(new Date()));
+export function greetingForNow(date = new Date()) {
+  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: config.timezone, hour: 'numeric', hourCycle: 'h23' }).format(date));
   if (hour < 12) return '¡Buenos días!';
-  if (hour < 19) return '¡Buenas tardes!';
+  if (hour < 18) return '¡Buenas tardes!';
   return '¡Buenas noches!';
 }
 
@@ -43,11 +43,14 @@ export function greetingForNow() {
  * reutilizar el prefijo en caché (caché implícita) y responder más rápido.
  * @param {{ name?: string, phone?: string, productContext: string, orderContext?: string }} session
  */
-export function buildSystemPrompt({ name, phone, productContext, orderContext, isNewConversation = false }) {
+export function buildSystemPrompt({ name, phone, productContext, orderContext, isNewConversation = false, customerProfile = '' }) {
   const staticPart = BARBARA_PROMPT.replace(KNOWLEDGE_BASE_MARKER, BUSINESS_INFO);
   const dynamicPart = [
     CATALOG_SECTION.replace('{CONTEXTO_PRODUCTOS}', productContext),
     ORDER_SECTION.replace('{PEDIDO_ACTUAL}', orderContext || 'El cliente aún no tiene productos en su pedido.'),
+    customerProfile
+      ? `## Memoria del cliente\n${customerProfile}\nSalúdalo por su nombre si lo conoces. Puedes ofrecer “¿Lo mismo de la vez pasada?”. Si hay una dirección guardada, confírmala antes de usarla. No digas que un pago está confirmado si el pedido no dice pago verificado.`
+      : '',
     SESSION_SECTION
       .replace('{NOMBRE_CLIENTE}', name || 'No indicado')
       .replace('{TELEFONO_CLIENTE}', phone ? `+${phone}` : 'No indicado')
@@ -77,8 +80,8 @@ export function classifyError(err) {
   const message = String(err?.message ?? err);
   const status = Number(err?.status ?? message.match(/"code"\s*:\s*(\d{3})/)?.[1] ?? 0);
 
-  if (status === 402 || /prepayment credits|billing/i.test(message)) {
-    return new GeminiError(message, { status, kind: 'billing', retryable: false,
+  if (status !== 429 && (status === 402 || /prepayment credits|billing|insufficient/i.test(message))) {
+    return new GeminiError(message, { status: status || 402, kind: 'billing', retryable: false,
       hint: 'El proyecto de Google AI Studio no tiene créditos. Recargue o active la facturación en https://ai.studio/projects' });
   }
   if (status === 401 || status === 403 || /API_KEY|PERMISSION_DENIED/i.test(message)) {
@@ -94,9 +97,13 @@ export function classifyError(err) {
       hint: `Gemini rechazó el pedido. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
   }
   if (status === 429) {
-    const quota = /quota|per day|limit: 0/i.test(message);
-    return new GeminiError(message, { status, kind: 'rate_limit', retryable: !quota,
-      hint: quota ? 'Se agotó la cuota del plan de Gemini.' : 'Demasiadas solicitudes seguidas; se reintentará.' });
+    const billing = /billing|credit|quota|prepayment|limit: 0|insufficient/i.test(message);
+    if (billing) {
+      return new GeminiError(message, { status, kind: 'billing', retryable: false,
+        hint: 'Gemini respondió 429: la cuenta no tiene créditos. Recargue el plan en Google AI Studio. No se reintenta ni se vuelve a avisar al asesor por 10 minutos.' });
+    }
+    return new GeminiError(message, { status, kind: 'rate_limit', retryable: true,
+      hint: 'Demasiadas solicitudes seguidas; se reintentará.' });
   }
   if (status >= 500) {
     return new GeminiError(message, { status, kind: 'server', retryable: true, hint: 'Falla temporal de Google (modelo saturado).' });
@@ -296,6 +303,7 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
   const contents = history.map((m) => ({ role: m.role, parts: [{ text: m.content }] }));
   const toolCalls = [];
   const turn = { model: config.gemini.model };
+  let jsonRetries = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = await withRetries((model) => callGemini(model, systemPrompt, contents, tools), turn);
@@ -303,13 +311,14 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
 
     if (!calls.length || !tools) {
       const raw = (response.text || '').trim();
-      if (!raw) {
-        const reason = response.candidates?.[0]?.finishReason ?? 'desconocida';
-        throw new GeminiError(`Gemini devolvió una respuesta vacía (finishReason: ${reason})`, {
-          kind: 'empty', retryable: false, hint: 'Gemini devolvió una respuesta vacía.' });
-      }
-      const parsed = parseSalesJson(raw);
+      const parsed = raw ? parseSalesJson(raw) : null;
       if (!parsed) {
+        if (jsonRetries < 1) {
+          jsonRetries += 1;
+          turn.model = config.gemini.fallbackModel || turn.model;
+          verbose('Gemini no devolvió el JSON de ventas; se reintenta una vez.');
+          continue;
+        }
         throw new GeminiError('Gemini no devolvió el JSON de ventas', {
           kind: 'empty', retryable: false, hint: 'La respuesta no trae el JSON con respuesta_cliente y confianza_porcentaje.',
         });

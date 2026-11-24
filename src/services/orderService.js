@@ -3,9 +3,12 @@ import { config } from '../config.js';
 import { publishCrm } from '../crm/events.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
-import { findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
+import { catalogCustomerReply, catalogOverviewText, findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
 import { buildPriceResult, buildStockResult } from './priceTools.js';
+import { STOCK_CHECK_REPLY, isAddIntent, isGenericCatalogQuery, isOrderStatusQuestion } from './customerText.js';
 import { closeTicketsForPhone } from './ticketStore.js';
+import { applyAction } from './orderBook.js';
+import { customerLogisticsReply } from './orderLifecycle.js';
 
 export const BOLETA_MARKER = '[BOLETA]';
 /** Marca en el historial: a partir de aquí el carrito anterior ya no cuenta. */
@@ -42,7 +45,11 @@ export function hasHouseNumber(address) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
-export const isSoldByWeight = (p) => /kilo|\bkg\b/i.test(p?.presentacion || '');
+/** Solo kilos sueltos (charcutería, a granel). Un paquete de "1 kg" no va a la balanza. */
+export function isSoldByWeight(p) {
+  const presentation = String(p?.presentacion || '');
+  return /por\s+kilo|por\s+kg|a\s+granel|kg\s+suelto/i.test(presentation);
+}
 
 const plain = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
@@ -113,6 +120,61 @@ export function computeTotals(items, bcv, { pickup = false } = {}) {
   // El total en Bs es la suma de las líneas, para que la boleta cuadre al sumarla a mano.
   const totalBs = rate ? round2(all.reduce((s, l) => s + (l.bs || 0), 0)) : null;
   return { lines, fees, pending, totalUsd, totalBs, rate, pickup: !!pickup };
+}
+
+function askedQuantity(text) {
+  const raw = String(text || '').toLowerCase();
+  if (/\b(una|un|1)\b/.test(raw)) return 1;
+  const digit = raw.match(/\b(\d+)\b/);
+  return digit ? Number(digit[1]) : 0;
+}
+
+/** Decide si este mensaje agrega un solo producto, pide opciones o no toca el carrito. */
+export async function planPurchase(text) {
+  if (isOrderStatusQuestion(text) || !isAddIntent(text)) return { action: 'none' };
+  const found = await searchProducts(text, {});
+  const products = found.products || [];
+  const chosen = products.filter((product) => customerExplicitlyChose(product, text, products));
+  if (chosen.length === 1) return { action: 'add', product: chosen[0], qty: askedQuantity(text) || 1 };
+  const brand = products.filter((product) => {
+    const mark = String(product.marca || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/\./g, '');
+    const spoken = String(text || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+    return mark.length >= 3 && spoken.includes(mark);
+  });
+  const qty = askedQuantity(text);
+  if (brand.length > 1 && qty === 1) {
+    const pick = brand.find((product) => product.destacado) || brand[0];
+    return { action: 'add', product: pick, qty: 1 };
+  }
+  if (products.length > 1) return { action: 'choose', products: products.slice(0, 5) };
+  if (products.length === 1 && customerExplicitlyChose(products[0], text, products)) {
+    return { action: 'add', product: products[0], qty: qty || 1 };
+  }
+  return { action: 'none' };
+}
+
+/** Sustituye [BOLETA] por el resumen real y no repite la pregunta de “algo más”. */
+export function expandCustomerReply(text, state = {}) {
+  let reply = String(text || '');
+  if (state.boleta) {
+    const boleta = state.boletaForCustomer ? state.boletaForCustomer() : state.boleta;
+    reply = reply.includes(BOLETA_MARKER) ? reply.replaceAll(BOLETA_MARKER, boleta) : `${boleta}\n\n${reply}`;
+    if (state.savedAddress) {
+      reply = reply.split(ADDRESS_QUESTION).join('').trim();
+      if (!reply.includes(state.savedAddress)) reply += `\n\n📍 *Dirección de entrega:* ${state.savedAddress}`;
+    } else if (!reply.includes(ADDRESS_QUESTION)) {
+      reply = `${reply.trim()}\n\n${ADDRESS_QUESTION}`;
+    }
+  }
+  let seenMore = false;
+  reply = reply.split('\n').filter((line) => {
+    if (/desea agregar algo m[aá]s/i.test(line)) {
+      if (seenMore) return false;
+      seenMore = true;
+    }
+    return true;
+  }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return reply;
 }
 
 export function renderBoleta(items, bcv, { pickup = false } = {}) {
@@ -211,6 +273,42 @@ export function isShortFollowUp(customerText) {
     return true;
   }
   return text.length <= 10 && !/[a-záéíóúñ]{5,}/i.test(text);
+}
+
+function plainChoice(value) {
+  return String(value || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+}
+
+/**
+ * El cliente nombró ESE producto en este turno, no solo la familia ("una harina").
+ * Si hay varias harinas, hace falta la marca o la variante (Juana, blanca, P.A.N.).
+ */
+export function customerExplicitlyChose(product, customerText, siblings = []) {
+  const text = plainChoice(customerText);
+  const name = plainChoice(product?.nombre);
+  const brand = plainChoice(product?.marca);
+  if (!text || !name) return false;
+  if (text.includes(name)) return true;
+  const generic = new Set(['harina', 'maiz', 'arroz', 'pasta', 'aceite', 'azucar', 'queso', 'jamon', 'leche', 'refresco']);
+  const tokens = name.split(/[^a-z0-9ñ]+/).filter((word) => word.length >= 4 && !generic.has(word));
+  const brandHit = brand.length >= 3 && text.includes(brand);
+  const tokenHits = tokens.filter((word) => text.includes(word));
+  if (!brandHit && !tokenHits.length) return false;
+  const hits = brandHit ? [...tokenHits, brand] : tokenHits;
+  const ambiguous = (siblings || []).some((other) => {
+    if (!other || other.nombre === product.nombre) return false;
+    const otherName = plainChoice(`${other.nombre} ${other.marca || ''}`);
+    return hits.every((word) => otherName.includes(word));
+  });
+  return !ambiguous;
+}
+
+/** Balanza solo si es por kilo y el cliente eligió ese producto en este turno. */
+export function shouldOpenScaleTicket(customerText, product, siblings = []) {
+  if (!isSoldByWeight(product)) return false;
+  if (!customerExplicitlyChose(product, customerText, siblings)) return false;
+  if (mentionsWeight(customerText) && !/\b(unidad|unidades|pieza|trozo|pedazo|bandeja)\b/i.test(customerText)) return false;
+  return true;
 }
 
 /** ¿El texto del cliente parece referirse a este producto? */
@@ -329,6 +427,49 @@ function matchPendingByTicket(pending, ticketItems) {
     return pending.slice(-1);
   }
   return matched;
+}
+
+async function orderFromTarget(target) {
+  const digits = String(target || '').replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.length <= 7) {
+    const byId = await db.getOrderById(Number(digits));
+    if (byId && byId.lifecycle !== 'cancelado') return byId;
+  }
+  return (await db.getCommercialOrder(digits)) || (await db.getActiveOrder(digits));
+}
+
+/** El asesor confirmó que el producto sí está y pasó el precio en USD. */
+export async function applyConfirmedStock(target, productName, usd, bcv) {
+  const order = await orderFromTarget(target);
+  if (!order) return { error: 'No encontré ese pedido o ese cliente.' };
+  const needle = String(productName || '').toLowerCase();
+  let item = order.items.find((entry) => entry.verificacion && String(entry.nombre || '').toLowerCase().includes(needle))
+    || order.items.find((entry) => entry.precio == null && String(entry.nombre || entry.detalle || '').toLowerCase().includes(needle));
+  if (!item) {
+    item = { nombre: productName, presentacion: 'confirmado en tienda', detalle: productName, precio: round2(usd), cantidad: 1, verificacion: false, botellon: false };
+    order.items.push(item);
+  } else {
+    item.precio = round2(usd);
+    item.verificacion = false;
+    item.pesable = false;
+    item.presentacion = 'confirmado en tienda';
+  }
+  await db.saveOrder(order);
+  const price = bcv ? `Bs. ${toBolivares(usd, bcv.rate).toFixed(2)} (o $ ${usd.toFixed(2)} USD)` : `$ ${usd.toFixed(2)} USD`;
+  return { order, message: `Sí lo tenemos: *${item.nombre}* quedó anotado en ${price}. ¿Desea agregar algo más?` };
+}
+
+/** El asesor confirmó que ese producto no está. Solo entonces se lo decimos al cliente. */
+export async function applyRejectedStock(target, productName) {
+  const order = await orderFromTarget(target);
+  if (!order) return { error: 'No encontré ese pedido o ese cliente.' };
+  const needle = String(productName || '').toLowerCase();
+  const before = order.items.length;
+  order.items = order.items.filter((entry) => !String(entry.nombre || entry.detalle || '').toLowerCase().includes(needle));
+  if (order.items.length === before) return { error: `No está "${productName}" en el pedido #${order.id}.` };
+  await db.saveOrder(order);
+  return { order, message: `Le confirmo que *${productName}* no lo tenemos en este momento. ¿Le ofrezco otra cosa?` };
 }
 
 /** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
@@ -515,7 +656,18 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
 
   const handlers = {
     async search_catalog({ consulta }) {
-      const found = await searchProducts(String(consulta || customerText || ''), {});
+      const query = String(consulta || customerText || '');
+      if (isGenericCatalogQuery(query)) {
+        return {
+          ok: true,
+          general: true,
+          productos: [],
+          resumen: catalogOverviewText(),
+          respuesta_sugerida: catalogCustomerReply(),
+          instruccion: 'Es una pregunta general del catálogo. No llame de nuevo a search_catalog. Liste las categorías del resumen. confianza 100. requiere_especialista false. No diga que no hay.',
+        };
+      }
+      const found = await searchProducts(query, {});
       const productos = (found.products || []).slice(0, 5).map((product) => ({
         sku: product.sku,
         nombre: `${product.nombre} (${product.presentacion})`,
@@ -541,6 +693,12 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async agregar_producto({ producto, cantidad }) {
       const qty = Number(cantidad);
       if (!(qty > 0)) return { error: 'La cantidad debe ser mayor que cero.' };
+      if (customerText && !isAddIntent(customerText)) {
+        return {
+          error: 'El cliente no pidió agregar un producto en este mensaje.',
+          instruccion: 'Si pregunta por su pedido, muéstrelo. No agregue ni duplique productos.',
+        };
+      }
       const found = findProduct(String(producto ?? ''));
       if (found.options) {
         return {
@@ -552,20 +710,26 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         };
       }
       if (!found.product) {
-        return {
-          error: `"${producto}" no está en el catálogo.`,
-          instruccion: 'Diga que por ahora no lo tenemos. Si en el contexto del catálogo hay SUGERENCIAS CERCANAS, ofrezca UNA. No invente productos fuera del catálogo.',
-        };
+        return handlers.verificar_stock({ producto: String(producto || '').trim(), cantidad: qty });
       }
 
       const p = found.product;
       const live = await db.getProductBySku(p.sku);
-      if (live) {
-        p.precio = Number(live.price);
-        p.stock = live.stock;
+      if (live && live.price != null) p.precio = Number(live.price);
+      if (live && live.stock != null) p.stock = live.stock;
+      const lookedUp = await searchProducts(customerText || producto, {});
+      const siblings = lookedUp.products?.length ? lookedUp.products : [p];
+      const planned = customerText ? await planPurchase(customerText) : { action: 'none' };
+      const plannedThis = planned.action === 'add' && planned.product?.nombre === p.nombre;
+      if (!plannedThis && !customerExplicitlyChose(p, customerText || producto, siblings)) {
+        return {
+          error: 'El cliente todavía no eligió un producto concreto.',
+          opciones: optionsList(siblings.slice(0, 5)),
+          instruccion: 'Liste estas opciones con su precio y pregunte cuál desea y cuántos. No agregue nada ni abra pesaje.',
+        };
       }
       if (p.stock === 0) {
-        return { error: `"${p.nombre}" está sin stock.`, instruccion: 'Diga que por ahora no hay y no lo agregue al pedido.' };
+        return handlers.verificar_stock({ producto: p.nombre, cantidad: qty });
       }
       // Auditoría dura: no agregar algo que el cliente no pidió en este turno (evita arrastrar pedidos viejos).
       if (customerText && !customerMentionsProduct(p.nombre, customerText) && !customerMentionsProduct(producto, customerText)) {
@@ -581,17 +745,21 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (isSoldByWeight(p) && moneyUsd > 0 && p.precio > 0) {
         addQty = round2(moneyUsd / p.precio);
         if (!(addQty > 0)) return { error: 'No se pudo calcular el peso a partir del monto.' };
-      } else if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
+      } else if (shouldOpenScaleTicket(customerText, p, siblings) && !weightMentionedFor(p.nombre, customerText)) {
         // "un aguacate", "3 plátanos": unidades → balanza.
         const result = await handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
         return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos ni monto): se envió a pesar en caja.` };
       }
 
       const order = await db.getOrCreateActiveOrder(phone);
+      if (['pago_reportado', 'pago_verificado', 'en_logistica', 'entregado'].includes(order.lifecycle)) {
+        return { error: 'Ese pedido ya tiene un pago reportado. No se le agregan productos hasta que el asesor lo revise.' };
+      }
       const existing = order.items.find((i) => i.nombre === p.nombre && i.presentacion === p.presentacion);
       if (existing) existing.cantidad = round2(existing.cantidad + addQty);
-      else order.items.push({ nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
+      else order.items.push({ sku: p.sku || null, nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
       order.status = 'abierto';
+      order.lifecycle = 'borrador';
       await db.saveOrder(order);
       state.cartChanged = true;
       state.catalogAdded = true;
@@ -601,9 +769,67 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       return { ok: true, agregado: `${addQty} x ${productLabel(p)}`, ...(nota ? { nota } : {}), pedido: summarize(order, bcv) };
     },
 
+    async verificar_stock({ producto, cantidad }) {
+      const nombre = String(producto || '').trim();
+      if (!nombre || isGenericCatalogQuery(nombre)) {
+        return {
+          ok: true,
+          general: true,
+          respuesta_sugerida: catalogCustomerReply(),
+          instruccion: 'No es un producto concreto. Responda con las categorías. No escale.',
+        };
+      }
+      const qty = Number(cantidad) > 0 ? Number(cantidad) : 1;
+      const detalle = qty === 1 ? nombre : `${nombre} (${qty})`;
+      const order = await db.getOrCreateActiveOrder(phone);
+      order.items.push({
+        nombre, presentacion: 'por verificar', detalle, precio: null, cantidad: qty,
+        verificacion: true, pesable: true, botellon: false,
+      });
+      order.status = 'abierto';
+      order.lifecycle = order.lifecycle && order.lifecycle !== 'borrador' ? order.lifecycle : 'borrador';
+      await db.saveOrder(order);
+      state.cartChanged = true;
+      state.consulted.push({ nombre, tipo: 'verificacion' });
+      await notify(
+        [
+          `Verificar stock: *${detalle}*`,
+          `Cliente: ${name || 'Sin nombre'} (+${phone})`,
+          order.id ? `Pedido #${order.id}` : null,
+          customerText ? `Escribió: "${String(customerText).slice(0, 240)}"` : null,
+          `Si lo hay: #hay ${order.id || phone} ${nombre} <precio USD>`,
+          `Si no lo hay: #nohay ${order.id || phone} ${nombre}`,
+        ].filter(Boolean).join('\n'),
+        { kind: 'weigh', phone, title: `Verificar stock: ${nombre}`, whatsapp: true },
+      );
+      return {
+        ok: true,
+        verificacion: true,
+        respuesta_cliente: STOCK_CHECK_REPLY,
+        instruccion: `Responda exactamente: "${STOCK_CHECK_REPLY}" No diga que no hay. El chat sigue abierto para el resto del pedido.`,
+      };
+    },
+
     async solicitar_pesaje({ producto, cantidad }) {
       const nombre = String(producto ?? '').trim();
       if (!nombre) return { error: 'Indique el producto a pesar.' };
+      const catalogHit = findProduct(nombre);
+      if (catalogHit.product && !isSoldByWeight(catalogHit.product)) {
+        return {
+          error: `"${catalogHit.product.nombre}" es un paquete de peso fijo (${catalogHit.product.presentacion}), no se pesa.`,
+          instruccion: 'No abra balanza. Si el cliente ya eligió ese paquete, use agregar_producto. Si hay varias opciones, lístelas y pregunte cuál.',
+        };
+      }
+      if (catalogHit.product) {
+        const lookedUp = await searchProducts(customerText || nombre, {});
+        const siblings = lookedUp.products?.length ? lookedUp.products : [catalogHit.product];
+        if (!shouldOpenScaleTicket(customerText, catalogHit.product, siblings)) {
+          return {
+            error: 'El cliente no pidió pesar ese producto en este turno.',
+            instruccion: 'No abra balanza ni anote el producto. Pregunte cuál desea y cuántos.',
+          };
+        }
+      }
       // Nunca anotar el mensaje completo como "producto".
       if (nombre.length > 60 || /\n/.test(nombre) || /^(hola|buenas|quiero|dame|necesito)\b/i.test(nombre)) {
         const found = findProduct(nombre);
@@ -730,9 +956,10 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         };
       }
       const t = computeTotals(order.items, bcv);
-      Object.assign(order, { status: 'boleta', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
+      Object.assign(order, { status: 'boleta', lifecycle: 'boleta_enviada', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
       await db.saveOrder(order);
-      state.boleta = renderBoleta(order.items, bcv);
+      state.boleta = renderBoleta(order.items, bcv, { pickup: order.fulfillment === 'pickup' || isPickupAddress(order.address) });
+      state.savedAddress = order.address || null;
       return {
         ok: true,
         instruccion: `Escribe exactamente ${BOLETA_MARKER} en tu respuesta (el sistema lo reemplaza por la boleta). Deja claro que el pedido AÚN NO ESTÁ CERRADO hasta que indiquen dirección de delivery (con número de casa) o “retiro en tienda”. No escribas tú los montos ni el total.`,
@@ -742,7 +969,10 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async registrar_direccion({ direccion }) {
       const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
-      if (order.status !== 'boleta') return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
+      if (!['borrador', 'boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(order.lifecycle || 'borrador')
+        && order.status !== 'abierto' && order.status !== 'boleta') {
+        return { error: 'Ese pedido ya no admite dirección.' };
+      }
       const raw = String(direccion ?? '').trim();
       const pickup = isPickupAddress(raw);
       if (!pickup && !hasHouseNumber(raw)) {
@@ -752,31 +982,28 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
           instruccion: 'NO registres el pedido todavía. Pida dirección con número de casa, o que escriba “retiro en tienda”. Sin eso el pedido no se cierra.',
         };
       }
-      const address = pickup ? '🏪 Retiro en tienda' : raw;
       const t = computeTotals(order.items, bcv, { pickup });
-      order.address = address;
-      order.status = 'recibido';
-      order.kitchen_status = 'nuevo';
-      order.total_usd = t.totalUsd;
-      order.total_bs = t.totalBs;
-      order.bcv_rate = t.rate ?? null;
-      await db.saveOrder(order);
+      const reduced = await applyAction(phone, { type: 'save_address', address: raw, totals: t, name });
+      if (reduced.error) return { error: reduced.error };
       state.addressSaved = true;
       state.pickup = pickup;
-
-      const boletaFinal = renderBoleta(order.items, bcv, { pickup });
-      await notify(
-        `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\n${pickup ? 'Modalidad: RETIRO EN TIENDA' : `Dirección: ${order.address}`}\n\n${boletaFinal}`,
-        { kind: 'order', phone, title: `Comanda #${order.id}`, whatsapp: false },
-      );
+      state.logistics = Boolean(reduced.logistics);
+      if (reduced.notice) {
+        await notify(reduced.notice, {
+          kind: 'logistica', phone, title: `Logística pedido #${reduced.order.id}`, whatsapp: true,
+        });
+      }
       return {
         ok: true,
-        pedido_numero: order.id,
-        direccion: order.address,
+        pedido_numero: reduced.order.id,
+        direccion: reduced.order.address,
         pickup,
-        instruccion: pickup
-          ? 'Confirme que el pedido quedó registrado para RETIRO EN TIENDA (sin delivery) e incluya datos de Pago Móvil.'
-          : 'Confirme que el pedido fue registrado con esa dirección e incluya los datos de Pago Móvil.',
+        logistics: Boolean(reduced.logistics),
+        instruccion: reduced.logistics
+          ? 'El pago y la ubicación ya están. Diga que un agente coordinará la entrega. No diga que el pago está confirmado.'
+          : (pickup
+            ? 'La dirección quedó guardada como retiro en tienda. Pida el comprobante de pago. No diga que el pago está confirmado ni que ya salió a cocina.'
+            : 'La dirección quedó guardada. Pida el comprobante de pago. No diga que el pago está confirmado.'),
       };
     },
   };
@@ -797,18 +1024,43 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
    * y se ahorra una segunda llamada a Gemini (varios segundos).
    */
   function finalize(calls) {
+    if (!calls.length) return null;
+    const checks = calls.filter((call) => call.result?.verificacion);
+    const added = calls.filter((call) => call.name === 'agregar_producto' && call.result?.ok);
+    const onlyCart = calls.every((call) => call.result?.verificacion || (call.name === 'agregar_producto' && call.result?.ok));
+    if (onlyCart && (checks.length || added.length)) {
+      const parts = [];
+      if (checks.length) parts.push(STOCK_CHECK_REPLY);
+      if (added.length) parts.push(`Anoté: ${added.map((call) => call.result.agregado).join(', ')}.\n${MORE_ITEMS_QUESTION}`);
+      return parts.join('\n\n');
+    }
+      const prices = calls.filter((call) => call.name === 'get_price' && call.result?.ok);
+    const onlyLookup = calls.every((call) => ['get_price', 'get_stock', 'search_catalog'].includes(call.name));
+    if (prices.length && onlyLookup && !calls.some((call) => call.result?.general)) {
+      const lines = prices.map((call) => {
+        const row = call.result;
+        const money = row.precio_bs != null
+          ? `Bs. ${Number(row.precio_bs).toFixed(2)} (o $ ${Number(row.precio_usd).toFixed(2)} USD)`
+          : `$ ${Number(row.precio_usd).toFixed(2)} USD`;
+        return `*${row.nombre}*${row.presentacion ? ` (${row.presentacion})` : ''}: ${money}`;
+      });
+      const ask = prices.length > 1
+        ? '¿Cuál de estas desea y cuántas?'
+        : '¿Cuántos desea?';
+      return `${lines.join('\n')}\n\n${ask}`;
+    }
     const terminal = new Set(['generar_boleta', 'registrar_direccion']);
-    if (!calls.length || !calls.every((c) => terminal.has(c.name) && c.result?.ok)) return null;
+    if (!calls.every((call) => terminal.has(call.name) && call.result?.ok)) return null;
 
     const address = calls.find((c) => c.name === 'registrar_direccion');
     if (address) {
+      if (address.result.logistics) return customerLogisticsReply(name);
       const modo = address.result.pickup
         ? '🏪 *Modalidad:* Retiro en tienda (sin cargo de delivery)'
-        : `📍 *Dirección de entrega:* ${address.result.direccion}`;
-      return `¡Muchas gracias${name ? `, ${name.split(' ')[0]}` : ''}! ✅ Su pedido *#${address.result.pedido_numero}* fue registrado con éxito.\n\n` +
+        : `📍 *Dirección guardada:* ${address.result.direccion}`;
+      return `¡Gracias${name ? `, ${name.split(' ')[0]}` : ''}! Anoté la entrega del pedido *#${address.result.pedido_numero}*.\n\n` +
         `${modo}\n\n` +
-        'Si paga por Pago Móvil, envíenos la captura del pago por este chat. 🛵\n' +
-        'También puede pagar en efectivo (USD o Bs.). ¡Gracias por preferir *Abasto Los Cuchos*! 🙏';
+        'Cuando pague por Pago Móvil, envíe la captura y el número de referencia por este chat. El pago queda en verificación hasta que un asesor lo confirme. 🛵';
     }
     return `${BOLETA_MARKER}\n\n${ADDRESS_QUESTION}`;
   }

@@ -4,18 +4,23 @@ import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
-import { historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
+import { STOCK_CHECK_REPLY, historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
-import { catalogOverviewText, searchProducts } from './catalogService.js';
+import { catalogCustomerReply, catalogOverviewText, searchProducts } from './catalogService.js';
+import { isOperationalTurn } from './orderLifecycle.js';
+import { loadProfileSummary } from './orderBook.js';
+import { tryOperationalTurn } from './operationalTurn.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
   BOLETA_MARKER,
+  expandCustomerReply,
   CANCEL_MARKER,
   createOrderTools,
   HOUSE_NUMBER_REMINDER,
   isSoldByWeight,
+  shouldOpenScaleTicket,
   moneyAmountMentioned,
   MORE_ITEMS_QUESTION,
   mentionsWeight,
@@ -35,7 +40,7 @@ const THREAD_FOLLOW_MSGS = 4;
 const WAITING_WEIGHT_REPLY =
   '¡Claro! Déjeme pesarlo aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️';
 
-const INTRO = 'Le saluda *Bárbara*, asistente virtual de *Abasto Los Cuchos*. 🙏';
+const INTRO = 'Le saluda *Bárbara*, asistente virtual de *Abasto Los Cuchos*.';
 
 const FALLBACK_REPLY =
   'Disculpe, en este momento presentamos un inconveniente técnico. 🙏\n\nUno de nuestros asesores de *Abasto Los Cuchos* le atenderá en breve.';
@@ -57,7 +62,17 @@ function lockPhone(phone, task) {
 }
 
 const TECH_ALERT_INTERVAL_MS = 30 * 60 * 1000;
-let lastTechAlertAt = 0;
+const BILLING_ALERT_INTERVAL_MS = 10 * 60 * 1000;
+const techAlerts = new Map();
+
+/** Un mismo fallo de facturación no vuelve a avisar al asesor hasta que pasen 10 minutos. */
+export function shouldNotifyTech(kind, now = Date.now()) {
+  const wait = kind === 'billing' ? BILLING_ALERT_INTERVAL_MS : TECH_ALERT_INTERVAL_MS;
+  const previous = techAlerts.get(kind) || 0;
+  if (now - previous < wait) return false;
+  techAlerts.set(kind, now);
+  return true;
+}
 
 const EMPTY_ESCALATION_REPLY =
   'Gracias por su mensaje. En breve uno de nuestros asesores de *Abasto Los Cuchos* le atenderá personalmente. 🙌';
@@ -99,6 +114,7 @@ function kindLabel(kind) {
     paused: 'Chat pausado',
     tech: 'Falla técnica',
     order: 'Nuevo pedido',
+    logistica: 'Entrega',
     info: 'Aviso',
   })[kind] || 'Aviso';
 }
@@ -177,14 +193,12 @@ async function ensureHandOff(aiText, customerText, tools) {
   if (!text) return;
 
   const found = await searchProducts(text, {});
-  const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
-  if (!weighables.length) return;
+  const products = found.products || [];
+  const weighables = products.filter((p) => shouldOpenScaleTicket(text, p, products));
+  if (weighables.length !== 1) return;
 
-  const needsScale = weighables.filter((p) => !weightMentionedFor(p.nombre, text));
-  const targets = needsScale.length ? needsScale : weighables;
-  const primary = targets.find((p) => /^(tomate|pl[aá]tano|cebolla|aguacate|lim[oó]n|papa|yuca|piment[oó]n|ajo|cilantro|lechuga)$/i.test(p.nombre))
-    || targets[0];
-  if (!primary?.nombre) return;
+  const primary = weighables[0];
+  if (!primary?.nombre || !isSoldByWeight(primary)) return;
 
   if (WEIGH_CLAIM_RE.test(aiText)) {
     // Solo el nombre de catálogo — nunca la frase completa del cliente.
@@ -218,12 +232,23 @@ function isGreeting(text) {
   return clean.length <= 60 && GREETING_RE.test(clean);
 }
 
-function greetingReply(text, isNewConversation) {
+function greetingName(name) {
+  const full = String(name || '').trim();
+  if (!full || /^cliente\b/i.test(full)) return '';
+  const first = full.split(/\s+/)[0];
+  if (/^(cliente|prueba|test|usuario)$/i.test(first)) return '';
+  return first;
+}
+
+function greetingReply(text, isNewConversation, name) {
   const group = text.match(/^\[Mensaje escrito en el grupo «?"?([^»"\];]+)/)?.[1];
   const viaGroup = group ? ` Le escribo por privado por su mensaje en el grupo *${group.trim()}*.` : '';
+  const who = greetingName(name);
+  const hello = greetingForNow();
+  const lead = who ? `${hello.replace(/!$/, '')}, ${who}!` : hello;
   return isNewConversation || group
-    ? `${greetingForNow()} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
-    : '¡Hola! ¿En qué le puedo ayudar? 😊';
+    ? `${lead} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
+    : `¡Hola${who ? `, ${who}` : ''}! ¿En qué le puedo ayudar? 😊`;
 }
 
 /**
@@ -240,6 +265,16 @@ async function buildProductContext(history, bcv, currentText = '') {
       retrievalScore: null,
       general: false,
       text: 'CONSULTA GENERAL (saludo o comando): no mencione productos ni diga que no hay.',
+    };
+  }
+  if (isOperationalTurn(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      operational: true,
+      text: 'TURNO DE PEDIDO (dirección, pago, ubicación o cierre). No busque productos ni escale por el catálogo.',
     };
   }
   if (isGeneralCatalogAsk(currentText)) {
@@ -318,6 +353,14 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
   const displayName = chat.name || name;
 
+  if (chat.status === 'LOGISTICA') {
+    await notify(
+      `${displayName || '+' + phone} (+${phone}) escribió mientras se coordina la entrega:\n"${text}"`,
+      { kind: 'logistica', phone, title: 'Mensaje en logística', whatsapp: true },
+    );
+    return { reply: null, escalated: false, paused: true };
+  }
+
   if (chat.status === 'SPECIALIST' || chat.paused) {
     const modo = chat.status === 'SPECIALIST' ? 'en modo especialista' : 'pausado';
     await notify(
@@ -347,6 +390,8 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
 
 /** Limpia carrito abierto + notas de caja de este chat (pedidos recibidos en cocina no se tocan). */
 async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
+  const current = await db.getActiveOrder(phone);
+  if (current?.items?.length || db.orderIsProtected(current)) return;
   const cleared = await db.clearActiveCarts(phone);
   closeTicketsForPhone(phone);
   await db.startFreshActiveOrder(phone);
@@ -373,11 +418,57 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     return Date.now();
   };
   let mark = turnStarted;
+  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  if (isOnlyGreetingOrControl(text) || isGreeting(text)) {
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: greetingReply(text, isNewConversation, displayName),
+      escalated: false,
+      paused: false,
+      productContext: 'Saludo, sin modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
+  if (isGeneralCatalogAsk(text)) {
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: catalogCustomerReply(),
+      escalated: false,
+      paused: false,
+      productContext: 'Catálogo general, sin búsqueda ni modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
+
   const bcv = await getBcvRate();
   mark = lap('tasa', mark);
-  // Conversación nueva: solo lo escrito después del último silencio largo. No se rellena con la respuesta vieja.
-  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
   const lightTurn = isLightTurn(text);
+  const customerProfile = await loadProfileSummary(phone, displayName).catch((err) => {
+    verbose(`No se pudo leer la memoria del cliente: ${err.message}`);
+    return '';
+  });
+
+  const fast = await tryOperationalTurn({ phone, name: displayName, text, bcv, notify });
+  if (fast?.reply) {
+    lap('operación', mark);
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: enforceBusinessName(fast.reply),
+      escalated: false,
+      paused: false,
+      productContext: 'Turno de pedido, sin búsqueda de catálogo.',
+      toolCalls: fast.toolCalls || [],
+      model: null,
+      tools: null,
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
 
   const products = await buildProductContext(scopedHistory, bcv, text);
   mark = lap('catálogo', mark);
@@ -385,7 +476,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   const customerText = customerTextWithThread(scopedHistory, text);
   const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
   const systemPrompt = buildSystemPrompt({
-    name: displayName, phone, productContext, orderContext: await renderOrderContext(phone, bcv), isNewConversation,
+    name: displayName, phone, productContext, orderContext: await renderOrderContext(phone, bcv), isNewConversation, customerProfile,
   });
 
   let reply;
@@ -430,6 +521,13 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       escalated = false;
     }
     toolCalls = result.toolCalls;
+    if ((toolCalls || []).some((call) => call.result?.verificacion)) {
+      decision.escalate = false;
+      decision.reason = null;
+      if (!String(reply || '').includes('verificando')) {
+        reply = [STOCK_CHECK_REPLY, reply].filter(Boolean).join('\n\n');
+      }
+    }
     const checked = replyIfInventedSku(reply, toolCalls);
     if (checked) {
       reply = checked;
@@ -468,7 +566,10 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       isNewConversation,
       resume,
     });
-    if (audited) reply = audited;
+    const currentOrder = await db.getActiveOrder(phone);
+    if (audited && auditorInventedScale(reply, audited, currentOrder?.items || [])) {
+      verbose(`[${phone}] Auditor descartado: inventó un pesaje que no está en el pedido.`);
+    } else if (audited) reply = audited;
     lap('auditor', mark);
   } else if (!lightTurn) {
     timings.push({ step: 'auditor', ms: 0, skipped: true });
@@ -489,6 +590,13 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     timings: closeTimings(),
     summary: summarizeTurns(scopedHistory),
   };
+}
+
+/** El auditor no puede inventar un pesaje si el pedido no tiene ese pendiente. */
+export function auditorInventedScale(draft, corrected, items = []) {
+  const scale = /pes(ar|ando|aje)|balanza|momentico/i;
+  const pendingScale = (items || []).some((item) => item && item.precio == null && (item.pesable || item.verificacion));
+  return scale.test(String(corrected || '')) && !pendingScale && !scale.test(String(draft || ''));
 }
 
 /** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
@@ -677,16 +785,9 @@ function stripPrematurePaymentPitch(text, state = {}) {
  * - tras agregar/quitar productos siempre se pregunta si desea algo más.
  */
 function applyOrderFlow(text, state) {
-  let reply = text;
+  let reply = expandCustomerReply(text, state);
 
-  if (state.boleta) {
-    const boleta = state.boletaForCustomer();
-    reply = reply.includes(BOLETA_MARKER)
-      ? reply.replace(BOLETA_MARKER, boleta)
-      : `${boleta}\n\n${ADDRESS_QUESTION}`;
-    if (!reply.includes(ADDRESS_QUESTION)) reply = `${reply}\n\n${ADDRESS_QUESTION}`;
-    return reply;
-  }
+  if (state.boleta) return reply;
 
   reply = reply.split(BOLETA_MARKER).join('').trim()
     .replace(/¿[^¿?]*(?:sería|seria) todo(?: por hoy)?\?\s*(?:🛒)?/gi, MORE_ITEMS_QUESTION);
@@ -709,10 +810,10 @@ function applyOrderFlow(text, state) {
     return reply;
   }
 
-  if (state.cartChanged && !state.addressSaved && !reply.includes(MORE_ITEMS_QUESTION)) {
+  if (state.cartChanged && !state.addressSaved && !/desea agregar algo m[aá]s/i.test(reply)) {
     reply = `${reply}\n\n${MORE_ITEMS_QUESTION}`;
   }
-  return reply;
+  return expandCustomerReply(reply, state);
 }
 
 /**
@@ -732,11 +833,11 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
     return { reply: FALLBACK_REPLY, escalated: false, paused: true, productContext, error };
   }
 
-  if (Date.now() - lastTechAlertAt > TECH_ALERT_INTERVAL_MS) {
-    lastTechAlertAt = Date.now();
+  const alertKind = error.kind === 'billing' ? 'billing' : 'tech';
+  if (shouldNotifyTech(alertKind)) {
     await notify(
       `${error.hint ?? error.message}\nÚltimo cliente: ${name || 'Sin nombre'} (+${phone}): "${text}"`,
-      { kind: 'tech', phone, title: 'Bárbara no pudo responder', whatsapp: false },
+      { kind: 'tech', phone, title: alertKind === 'billing' ? 'Gemini sin créditos' : 'Bárbara no pudo responder', whatsapp: false },
     );
   }
   if (resume && FAILURE_REPLY_RE.test(await db.getLatestMessage(phone)?.content ?? '')) {

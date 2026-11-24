@@ -96,7 +96,7 @@ async function messageToText(message) {
     case 'text':
       return message.text?.body ?? '';
     case 'image':
-      return `[El cliente adjuntó una imagen${message.image?.caption ? ` con el texto: "${message.image.caption}"` : ''}]`;
+      return `[El cliente adjuntó una imagen${message.image?.id ? ` id:${message.image.id}` : ''}${message.image?.caption ? ` con el texto: "${message.image.caption}"` : ''}]`;
     case 'document':
       return `[El cliente adjuntó un documento${message.document?.filename ? ` llamado "${message.document.filename}"` : ''}${message.document?.caption ? ` con el texto: "${message.document.caption}"` : ''}]`;
     case 'audio':
@@ -176,4 +176,7 @@ app.listen(config.port, () => {
   console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
   getBcvRate().then((bcv) => console.log(bcv ? `Tasa BCV: ${bcv.rate} Bs/USD (${bcv.date})` : 'Tasa BCV no disponible'));
   if (!config.advisorPhone) console.warn('ADVISOR_PHONE no configurado: los avisos de escalado quedan en el CRM.');
+  db.listOpenOrders()
+    .then((orders) => console.log(`Pedidos abiertos recuperados: ${orders.length}.`))
+    .catch((err) => console.warn('No se pudieron recargar los pedidos abiertos:', err.message));
 });

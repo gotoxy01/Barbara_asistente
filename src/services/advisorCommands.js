@@ -3,20 +3,25 @@ import * as db from '../db.js';
 import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
-import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { applyConfirmedStock, applyNotAvailable, applyRejectedStock, applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { applyAction } from './orderBook.js';
 import { getTicket } from './ticketStore.js';
 
 const HELP =
   '*Comandos del asesor*\n' +
   '#precio <monto>: precio en USD de lo que pesó o consultó (responda a la alerta de caja)\n' +
   '#precio <teléfono> <monto>: igual, indicando el cliente\n' +
+  '#hay <pedido|teléfono> <producto> <precio>: sí lo hay; se anota con ese precio en USD\n' +
   '#nohay: avisar al cliente que no hay lo que consultó (responda a la alerta de caja)\n' +
   '#nohay <teléfono>: igual, indicando el cliente\n' +
+  '#nohay <pedido|teléfono> <producto>: no hay ese producto que se estaba verificando\n' +
   '#b: ver los pedidos pendientes\n' +
   '#b <teléfono>: borrar el pedido pendiente de ese cliente\n' +
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
   '#pausar <teléfono>: pasar el chat a especialista (Bárbara no responde hasta #reanudar)\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
+  '#pagado <pedido>: el pago ya se vio en el banco; descuenta el inventario una sola vez\n' +
+  '#rechazar <pedido>: el comprobante no sirve; si ya se había descontado, se devuelve\n' +
   '#ayuda: ver esta lista';
 
 const manualPauseMs = () => config.manualPauseMinutes * 60 * 1000;
@@ -37,6 +42,34 @@ function phoneFromAlert(text) {
   return t.match(/Cliente:\*?\s*\+?(\d{8,15})/)?.[1]
     ?? t.match(/\+(\d{8,15})/)?.[1]
     ?? null;
+}
+
+async function handleHay(body) {
+  const match = body.match(/^#hay\s+(\S+)\s+(.+)\s+(\d+(?:[.,]\d{1,2})?)\s*$/i);
+  if (!match) {
+    await ack('Formato: #hay <pedido o teléfono> <producto> <precio USD>. Ejemplo: #hay 12 leche 1.80');
+    return;
+  }
+  const usd = Number(match[3].replace(',', '.'));
+  if (!(usd > 0)) {
+    await ack('El precio en USD debe ser mayor que cero.');
+    return;
+  }
+  const result = await applyConfirmedStock(match[1], match[2].trim(), usd, await getBcvRate());
+  if (result.error || !result.order) {
+    await ack(result.error || 'No se pudo anotar el producto.');
+    return;
+  }
+  await deliverToCustomer(result.order.phone, result, `✅ ${match[2].trim()} a $ ${usd.toFixed(2)} anotado para +${result.order.phone}.`);
+}
+
+async function handleNoHayProduct(target, productName) {
+  const result = await applyRejectedStock(target, productName);
+  if (result.error || !result.order) {
+    await ack(result.error || 'No se pudo actualizar el pedido.');
+    return;
+  }
+  await deliverToCustomer(result.order.phone, result, `✅ Se le avisó a +${result.order.phone} que no está ${productName}.`);
 }
 
 async function handlePrice(body, quotedBody) {
@@ -71,10 +104,43 @@ function normalizePhone(raw) {
   return digits;
 }
 
+async function settlePayment(command, token) {
+  const digits = String(token || '').replace(/\D/g, '');
+  const order = digits && digits.length <= 7
+    ? await db.getOrderById(Number(digits))
+    : (digits ? await db.getCommercialOrder(digits) : null);
+  if (!order) {
+    await ack('No encontré ese pedido. Use #pagado <número> o #rechazar <número>.');
+    return;
+  }
+  const reduced = await applyAction(order.phone, {
+    type: command === 'pagado' ? 'verify_payment' : 'reject_payment',
+    orderId: order.id,
+    actor: 'operador',
+  });
+  if (reduced.error) {
+    await ack(reduced.error);
+    return;
+  }
+  if (reduced.customerReply) {
+    try {
+      const sent = await sendMessage(order.phone, reduced.customerReply);
+      await recordAdvisorMessage(order.phone, outboundRecord(sent, reduced.customerReply));
+    } catch (err) {
+      await ack(`El pedido #${order.id} quedó en ${reduced.order.lifecycle}, pero no se pudo avisar al cliente: ${err.message}`);
+      return;
+    }
+  }
+  const moved = reduced.ledger
+    ? ` Inventario en el libro de Bárbara (${reduced.ledger.action}): ${(reduced.ledger.lines || []).map((line) => `${line.cantidad} ${line.nombre}`).join(', ') || 'sin líneas'}. Hay que ajustarlo en la caja; este programa no escribe en database.db.`
+    : ' El inventario no se movió otra vez.';
+  await ack(`Pedido #${order.id} quedó en ${reduced.order.lifecycle}.${moved}`);
+}
+
 function describeOrder(o) {
   const count = o.items.length;
   const total = o.total_usd != null ? ` - $ ${o.total_usd.toFixed(2)}` : '';
-  const state = { abierto: 'armando', boleta: 'boleta enviada', recibido: 'registrado' }[o.status] ?? o.status;
+  const state = o.lifecycle || ({ abierto: 'armando', boleta: 'boleta enviada', recibido: 'registrado' }[o.status] ?? o.status);
   return `Pedido #${o.id} (${state}): ${count} producto${count === 1 ? '' : 's'}${total}`;
 }
 
@@ -149,12 +215,22 @@ async function deliverToCustomer(phone, result, confirmation) {
  */
 export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   const text = String(body ?? '').trim();
+  if (/^#hay\b/i.test(text)) {
+    await handleHay(text);
+    return true;
+  }
   if (/^#precio\b/i.test(text)) {
     await handlePrice(text, quotedBody);
     return true;
   }
   if (/^#no\s?hay\b/i.test(text)) {
-    await handleNotAvailable(text.replace(/^#no\s?hay/i, '#nohay'), quotedBody);
+    const normalized = text.replace(/^#no\s?hay/i, '#nohay');
+    const specific = normalized.match(/^#nohay\s+(\S+)\s+(.+)$/i);
+    if (specific && !/^\d+(?:[.,]\d+)?$/.test(specific[2].trim())) {
+      await handleNoHayProduct(specific[1], specific[2].trim());
+      return true;
+    }
+    await handleNotAvailable(normalized, quotedBody);
     return true;
   }
   if (/^#b(orrar)?\b/i.test(text)) {
@@ -171,6 +247,10 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   switch (command.toLowerCase()) {
     case 'ayuda':
       await ack(HELP);
+      return true;
+    case 'pagado':
+    case 'rechazar':
+      await settlePayment(command, rawPhone || rest);
       return true;
     case 'pausar':
       if (!phone) break;

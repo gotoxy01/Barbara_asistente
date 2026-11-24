@@ -315,13 +315,15 @@ export function makeSku(parts) {
     .slice(0, 64);
 }
 
-function buildProduct({ nombre, presentacion, precio, categoria, marca = '', sku = '', stock = null }) {
+function buildProduct({ nombre, presentacion, precio, categoria, marca = '', sku = '', stock = null, destacado = false }) {
   const label = presentacion || 'unidad';
   return {
     nombre,
     presentacion: label,
     precio: Number(precio),
     categoria,
+    marca,
+    destacado: Boolean(destacado),
     stock: stock == null || stock === '' ? null : Number(stock),
     sku: sku || makeSku([categoria, nombre, label]),
     nameTokens: nameTokens(`${nombre} ${marca}`),
@@ -463,6 +465,21 @@ export function catalogOverviewText() {
     'Responda con estas categorías y ejemplos reales. No invente productos ni precios. No diga que no hay. No pida especialista.',
     lines.join('\n') || '- El catálogo todavía no tiene productos cargados.',
   ].join('\n');
+}
+
+/** Texto para el cliente, sin instrucciones internas. */
+export function catalogCustomerReply() {
+  const products = getProducts().filter((product) => product.categoria !== 'politica' && product.sku !== 'servicio-delivery');
+  const byCategory = new Map();
+  for (const product of products) {
+    const category = product.categoria || 'Otros';
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    const names = byCategory.get(category);
+    if (names.length < 2) names.push(product.nombre);
+  }
+  const lines = [...byCategory.entries()].map(([category, names]) => `• *${category}:* ${names.join(', ')}`);
+  if (!lines.length) return 'Tenemos víveres, charcutería, ferretería y farmacia. ¿Qué está buscando?';
+  return `Con gusto. Estas son las categorías que manejamos:\n${lines.join('\n')}\n\n¿Qué está buscando? 😊`;
 }
 
 export function getCatalogInfo() {

@@ -36,7 +36,9 @@ const FILLER = new Set(`
   ese eso son estan muy mas pero
 `.split(/\s+/).filter(Boolean));
 
-const GENERAL_ASK = /\b(que tienes|que tienen|que venden|que vende|que hay|que ofrecen|que manejan|catalogo|categorias|ofertas|promociones)\b/;
+const GENERAL_ASK = /\b(que tienes|que tienen|que venden|que vende|que hay|que ofrecen|que manejan|que productos|que mas|mas tienen|productos tienen|productos venden|productos hay|catalogo|categorias|ofertas|promociones)\b/;
+
+export const STOCK_CHECK_REPLY = 'En este momento estoy verificando si lo tenemos en stock, deme un momento.';
 
 function plain(text) {
   return String(text || '')
@@ -58,6 +60,36 @@ export function isGeneralCatalogAsk(text) {
     return true;
   });
   return leftovers.length === 0;
+}
+
+/** "¿Y mi harina?" pregunta por el pedido. No es un pedido nuevo. */
+export function isOrderStatusQuestion(text) {
+  const normalized = plain(text);
+  if (!normalized) return false;
+  return /\b(y mi|y el pedido|y mi pedido|que llevo|como va|status del pedido)\b/.test(normalized)
+    || /^(y )?(mi |el |la )?(pedido|harina|compra)\b/.test(normalized);
+}
+
+/** Quiere agregar algo ahora. Una pregunta por el pedido, o un "¿tienen?", no cuenta. */
+export function isAddIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw || isOrderStatusQuestion(raw) || isGeneralCatalogAsk(raw)) return false;
+  if (/\?\s*$/.test(raw) && !/\b(quiero|dame|deme|anota|agrega|ponme|mandame|m[aá]ndame)\b/i.test(raw)) return false;
+  return /\b(quiero|dame|deme|anota|agrega|agregue|ponme|m[aá]ndame|mandame|necesito)\b/i.test(raw);
+}
+
+/** "catalogo general" no es un producto: no se manda a search_catalog. */
+export function isGenericCatalogQuery(text) {
+  if (isGeneralCatalogAsk(text)) return true;
+  const normalized = plain(text);
+  if (!normalized) return true;
+  const words = normalized.split(' ').filter((word) => {
+    if (word.length < 3) return false;
+    if (GENERAL_WORDS.has(word) || FILLER.has(word)) return false;
+    if (/^(general|todo|toda|todos|todas)$/.test(word)) return false;
+    return true;
+  });
+  return words.length === 0;
 }
 
 /** Saludo, comando o pregunta de catálogo sin un producto concreto: una sola llamada, sin auditor. */
@@ -88,5 +120,5 @@ export function replyIfInventedSku(reply, toolCalls = []) {
   const found = toolCalls.some((call) => call.name === 'search_catalog' && call.result?.ok && call.result.productos?.length);
   if (!failedUnknown || found) return null;
   if (!UNAVAILABLE_RE.test(String(reply || ''))) return null;
-  return 'Déjeme verificar ese producto en el inventario y le confirmo en un momento.';
+  return STOCK_CHECK_REPLY;
 }

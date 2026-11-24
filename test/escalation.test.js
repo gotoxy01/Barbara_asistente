@@ -26,16 +26,17 @@ describe('umbral de confianza y escalado', () => {
     assert.equal(decideEscalation({ ...base, confianza: 99, customerText: 'cotización al mayor de harina' }).reason, 'Cotización al mayor');
   });
 
-  it('escala una cotización que no está en el catálogo', () => {
+  it('un producto que no está en el catálogo no pausa el chat: se verifica con el vendedor', () => {
     const decision = decideEscalation({
       ...base,
       catalogType: 'none',
       catalogTerms: ['tractor'],
-      confianza: 96,
+      confianza: 26,
+      requiereEspecialista: true,
+      motivoEscalado: 'Consulta fuera de catálogo',
       customerText: 'cuánto cuesta un tractor',
     });
-    assert.equal(decision.escalate, true);
-    assert.equal(decision.reason, 'Consulta fuera de catálogo');
+    assert.equal(decision.escalate, false);
   });
 
   it('un saludo sin producto no se escala si la confianza es alta', () => {
@@ -58,6 +59,20 @@ describe('umbral de confianza y escalado', () => {
     });
     assert.equal(decision.escalate, true);
     assert.match(decision.reason, /búsqueda/);
+  });
+
+  it('“qué productos tienen para la venta” no se escala aunque el modelo pida especialista', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 26,
+      retrievalScore: 0.26,
+      catalogType: 'none',
+      catalogTerms: ['productos', 'venta'],
+      requiereEspecialista: true,
+      motivoEscalado: 'Consulta fuera de catálogo',
+      customerText: 'Que productos tienen para la venta?',
+    });
+    assert.equal(decision.escalate, false);
   });
 
   it('una pregunta general del catálogo no se escala aunque la búsqueda de "venta" haya sido floja', () => {

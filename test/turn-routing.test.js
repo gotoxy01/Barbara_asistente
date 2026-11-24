@@ -2,7 +2,10 @@ import './setup.js';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { catalogOverviewText, searchProducts } from '../src/services/catalogService.js';
-import { isGeneralCatalogAsk, isLightTurn } from '../src/services/customerText.js';
+import { STOCK_CHECK_REPLY, isGeneralCatalogAsk, isGenericCatalogQuery, isLightTurn } from '../src/services/customerText.js';
+import { catalogCustomerReply } from '../src/services/catalogService.js';
+import { classifyError } from '../src/services/aiService.js';
+import { shouldNotifyTech } from '../src/services/chatService.js';
 import { scopeHistoryForTurn } from '../src/services/orderService.js';
 import { runToolCalls, salesCallConfig, thinkingConfigFor } from '../src/services/aiService.js';
 
@@ -11,6 +14,12 @@ const STALE = '❌ Harina Pan: por ahora no la tenemos disponible';
 describe('preguntas generales y contexto del turno', () => {
   it('clasifica el catálogo en general y deja pasar un producto concreto', () => {
     assert.equal(isGeneralCatalogAsk('Que tienes en la venta?'), true);
+    assert.equal(isGeneralCatalogAsk('Que productos tienen para la venta?'), true);
+    assert.equal(isLightTurn('Que productos tienen para la venta?'), true);
+    assert.equal(isGenericCatalogQuery('catalogo general'), true);
+    assert.equal(isGenericCatalogQuery('harina pan'), false);
+    assert.match(catalogCustomerReply(), /Víveres/);
+    assert.match(STOCK_CHECK_REPLY, /verificando si lo tenemos en stock/);
     assert.equal(isGeneralCatalogAsk('¿Qué venden?'), true);
     assert.equal(isGeneralCatalogAsk('catálogo'), true);
     assert.equal(isGeneralCatalogAsk('categorías'), true);
@@ -55,6 +64,16 @@ describe('preguntas generales y contexto del turno', () => {
     const withTools = salesCallConfig('gemini-3.5-flash', { declarations: [{ name: 'get_price' }] });
     assert.equal(withTools.toolConfig.functionCallingConfig.mode, 'AUTO');
     assert.equal(withTools.responseMimeType, undefined);
+  });
+
+  it('un 429 de facturación no se reintenta y el aviso al asesor se deduplica 10 minutos', () => {
+    const error = classifyError({ status: 429, message: 'billing: quota exceeded, no credits' });
+    assert.equal(error.kind, 'billing');
+    assert.equal(error.retryable, false);
+    const start = 1_000_000;
+    assert.equal(shouldNotifyTech('billing', start), true);
+    assert.equal(shouldNotifyTech('billing', start + 60_000), false);
+    assert.equal(shouldNotifyTech('billing', start + 11 * 60_000), true);
   });
 
   it('ejecuta las herramientas de un mismo turno en paralelo', async () => {
