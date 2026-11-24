@@ -9,7 +9,6 @@ import { isOperationalTurn } from './orderLifecycle.js';
 const HUMAN_RE = /hablar con (un |una )?(persona|asesor|humano|encargad)|asesor humano|persona real|quiero (un |una )?(asesor|persona|humano)|atenci[oó]n humana|comun[ií]queme con/i;
 const COMPLAINT_RE = /\b(queja|reclamo|reclamaci[oó]n|estafa|p[eé]sim[oa]|indignad[oa]|muy molest[oa]|no sirve|me enga[nñ]|timaron)\b/i;
 const WHOLESALE_RE = /\b(al mayor|al por mayor|por mayor|mayoreo|mayorista|cotizaci[oó]n especial)\b/i;
-const QUOTE_RE = /\b(precio|cuesta|cu[aá]nto|cotiz|quiero|necesito|tienen|hay|vende[ns]?|compro|d[oó]lar|bol[ií]var)\b/i;
 const PRICE_IN_REPLY_RE = /\$\s*\d|\bBs\.?\s*\d/i;
 
 export const HANDOFF_REPLY =
@@ -57,17 +56,17 @@ export function decideEscalation(input = {}) {
   if ((isOnlyGreetingOrControl(text) || general || operational) && !(human || complaint || wholesale)) {
     return { escalate: false, ignore: false, reason: null, confianza: confianzaNum };
   }
-  const outOfCatalog = !general && !operational && input.catalogType === 'none'
-    && Array.isArray(input.catalogTerms)
-    && input.catalogTerms.length > 0
-    && QUOTE_RE.test(text);
+  const catalogMiss = /fuera de cat[aá]logo|no (lo |la )?tenemos|no est[aá] en el cat[aá]logo|no reconoc/i.test(motivo || '');
+  const outOfCatalog = false;
   const retrievalPct = input.retrievalScore == null ? null : Math.round(Number(input.retrievalScore) * 100);
   const retrievalLow = !general && !operational && retrievalPct != null
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
     && retrievalPct <= threshold;
-  const low = confianzaNum <= threshold || retrievalLow;
-  const modelAsked = input.requiereEspecialista === true;
+  const unknownProduct = !general && !operational && input.catalogType === 'none'
+    && Array.isArray(input.catalogTerms) && input.catalogTerms.length > 0;
+  const low = !unknownProduct && (confianzaNum <= threshold || retrievalLow);
+  const modelAsked = input.requiereEspecialista === true && !catalogMiss && !general && !operational;
 
   if (!(human || complaint || wholesale || outOfCatalog || low || modelAsked)) {
     return { escalate: false, ignore: false, reason: null, confianza: confianzaNum };

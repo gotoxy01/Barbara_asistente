@@ -98,7 +98,9 @@ while (true) {
   const started = performance.now();
   const result = await handleCustomerMessage({ phone, name, text }, { notify: printNotice });
   const elapsed = ((performance.now() - started) / 1000).toFixed(1);
-  if (result.error) console.error(`\n  (Error de Gemini [${result.error.kind ?? '?'} ${result.error.status ?? ''}]: ${result.error.hint ?? result.error.message})`);
+  if (result.error?.kind === 'billing') {
+    console.error('  Aviso: Gemini está sin créditos (429). Recargue el plan en Google AI Studio. El cliente ya recibió el aviso amable; no se escala otra vez por 10 minutos.');
+  } else if (result.error) console.error(`\n  (Error de Gemini [${result.error.kind ?? '?'} ${result.error.status ?? ''}]: ${result.error.hint ?? result.error.message})`);
   if (result.productContext) console.log(`\n  ┌ Contexto de catálogo\n  │ ${result.productContext.split('\n').join('\n  │ ')}\n  └`);
   for (const call of result.toolCalls ?? []) {
     console.log(`  ⚙ ${call.name}(${JSON.stringify(call.args)}) → ${JSON.stringify(call.result).slice(0, 160)}`);

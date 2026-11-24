@@ -465,6 +465,21 @@ export function catalogOverviewText() {
   ].join('\n');
 }
 
+/** Texto para el cliente, sin instrucciones internas. */
+export function catalogCustomerReply() {
+  const products = getProducts().filter((product) => product.categoria !== 'politica' && product.sku !== 'servicio-delivery');
+  const byCategory = new Map();
+  for (const product of products) {
+    const category = product.categoria || 'Otros';
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    const names = byCategory.get(category);
+    if (names.length < 2) names.push(product.nombre);
+  }
+  const lines = [...byCategory.entries()].map(([category, names]) => `• *${category}:* ${names.join(', ')}`);
+  if (!lines.length) return 'Tenemos víveres, charcutería, ferretería y farmacia. ¿Qué está buscando?';
+  return `Con gusto. Estas son las categorías que manejamos:\n${lines.join('\n')}\n\n¿Qué está buscando? 😊`;
+}
+
 export function getCatalogInfo() {
   const products = getProducts();
   return {

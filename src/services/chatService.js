@@ -4,10 +4,10 @@ import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
-import { historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
+import { STOCK_CHECK_REPLY, historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
-import { catalogOverviewText, searchProducts } from './catalogService.js';
+import { catalogCustomerReply, catalogOverviewText, searchProducts } from './catalogService.js';
 import { isOperationalTurn } from './orderLifecycle.js';
 import { loadProfileSummary } from './orderBook.js';
 import { tryOperationalTurn } from './operationalTurn.js';
@@ -60,7 +60,17 @@ function lockPhone(phone, task) {
 }
 
 const TECH_ALERT_INTERVAL_MS = 30 * 60 * 1000;
-let lastTechAlertAt = 0;
+const BILLING_ALERT_INTERVAL_MS = 10 * 60 * 1000;
+const techAlerts = new Map();
+
+/** Un mismo fallo de facturación no vuelve a avisar al asesor hasta que pasen 10 minutos. */
+export function shouldNotifyTech(kind, now = Date.now()) {
+  const wait = kind === 'billing' ? BILLING_ALERT_INTERVAL_MS : TECH_ALERT_INTERVAL_MS;
+  const previous = techAlerts.get(kind) || 0;
+  if (now - previous < wait) return false;
+  techAlerts.set(kind, now);
+  return true;
+}
 
 const EMPTY_ESCALATION_REPLY =
   'Gracias por su mensaje. En breve uno de nuestros asesores de *Abasto Los Cuchos* le atenderá personalmente. 🙌';
@@ -222,12 +232,13 @@ function isGreeting(text) {
   return clean.length <= 60 && GREETING_RE.test(clean);
 }
 
-function greetingReply(text, isNewConversation) {
+function greetingReply(text, isNewConversation, name) {
   const group = text.match(/^\[Mensaje escrito en el grupo «?"?([^»"\];]+)/)?.[1];
   const viaGroup = group ? ` Le escribo por privado por su mensaje en el grupo *${group.trim()}*.` : '';
+  const who = name ? `, ${String(name).split(' ')[0]}` : '';
   return isNewConversation || group
-    ? `${greetingForNow()} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
-    : '¡Hola! ¿En qué le puedo ayudar? 😊';
+    ? `${greetingForNow()}${who} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
+    : `¡Hola${who}! ¿En qué le puedo ayudar? 😊`;
 }
 
 /**
@@ -397,10 +408,34 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     return Date.now();
   };
   let mark = turnStarted;
+  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  if (isOnlyGreetingOrControl(text) || isGreeting(text)) {
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: greetingReply(text, isNewConversation, displayName),
+      escalated: false,
+      paused: false,
+      productContext: 'Saludo, sin modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
+  if (isGeneralCatalogAsk(text)) {
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: catalogCustomerReply(),
+      escalated: false,
+      paused: false,
+      productContext: 'Catálogo general, sin búsqueda ni modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
+
   const bcv = await getBcvRate();
   mark = lap('tasa', mark);
-  // Conversación nueva: solo lo escrito después del último silencio largo. No se rellena con la respuesta vieja.
-  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
   const lightTurn = isLightTurn(text);
   const customerProfile = await loadProfileSummary(phone, displayName).catch((err) => {
     verbose(`No se pudo leer la memoria del cliente: ${err.message}`);
@@ -476,6 +511,13 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       escalated = false;
     }
     toolCalls = result.toolCalls;
+    if ((toolCalls || []).some((call) => call.result?.verificacion)) {
+      decision.escalate = false;
+      decision.reason = null;
+      if (!String(reply || '').includes('verificando')) {
+        reply = [STOCK_CHECK_REPLY, reply].filter(Boolean).join('\n\n');
+      }
+    }
     const checked = replyIfInventedSku(reply, toolCalls);
     if (checked) {
       reply = checked;
@@ -778,11 +820,11 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
     return { reply: FALLBACK_REPLY, escalated: false, paused: true, productContext, error };
   }
 
-  if (Date.now() - lastTechAlertAt > TECH_ALERT_INTERVAL_MS) {
-    lastTechAlertAt = Date.now();
+  const alertKind = error.kind === 'billing' ? 'billing' : 'tech';
+  if (shouldNotifyTech(alertKind)) {
     await notify(
       `${error.hint ?? error.message}\nÚltimo cliente: ${name || 'Sin nombre'} (+${phone}): "${text}"`,
-      { kind: 'tech', phone, title: 'Bárbara no pudo responder', whatsapp: false },
+      { kind: 'tech', phone, title: alertKind === 'billing' ? 'Gemini sin créditos' : 'Bárbara no pudo responder', whatsapp: false },
     );
   }
   if (resume && FAILURE_REPLY_RE.test(await db.getLatestMessage(phone)?.content ?? '')) {

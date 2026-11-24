@@ -80,8 +80,8 @@ export function classifyError(err) {
   const message = String(err?.message ?? err);
   const status = Number(err?.status ?? message.match(/"code"\s*:\s*(\d{3})/)?.[1] ?? 0);
 
-  if (status === 402 || /prepayment credits|billing/i.test(message)) {
-    return new GeminiError(message, { status, kind: 'billing', retryable: false,
+  if (status !== 429 && (status === 402 || /prepayment credits|billing|insufficient/i.test(message))) {
+    return new GeminiError(message, { status: status || 402, kind: 'billing', retryable: false,
       hint: 'El proyecto de Google AI Studio no tiene créditos. Recargue o active la facturación en https://ai.studio/projects' });
   }
   if (status === 401 || status === 403 || /API_KEY|PERMISSION_DENIED/i.test(message)) {
@@ -97,9 +97,13 @@ export function classifyError(err) {
       hint: `Gemini rechazó el pedido. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
   }
   if (status === 429) {
-    const quota = /quota|per day|limit: 0/i.test(message);
-    return new GeminiError(message, { status, kind: 'rate_limit', retryable: !quota,
-      hint: quota ? 'Se agotó la cuota del plan de Gemini.' : 'Demasiadas solicitudes seguidas; se reintentará.' });
+    const billing = /billing|credit|quota|prepayment|limit: 0|insufficient/i.test(message);
+    if (billing) {
+      return new GeminiError(message, { status, kind: 'billing', retryable: false,
+        hint: 'Gemini respondió 429: la cuenta no tiene créditos. Recargue el plan en Google AI Studio. No se reintenta ni se vuelve a avisar al asesor por 10 minutos.' });
+    }
+    return new GeminiError(message, { status, kind: 'rate_limit', retryable: true,
+      hint: 'Demasiadas solicitudes seguidas; se reintentará.' });
   }
   if (status >= 500) {
     return new GeminiError(message, { status, kind: 'server', retryable: true, hint: 'Falla temporal de Google (modelo saturado).' });

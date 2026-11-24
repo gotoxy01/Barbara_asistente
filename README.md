@@ -107,6 +107,8 @@ El inventario de la caja (`database.db`) no se modifica. Al verificar el pago se
 
 | Comando | Quién | Efecto |
 | --- | --- | --- |
+| `#hay <pedido o teléfono> <producto> <precio>` | Asesor | El producto sí está; se anota con ese precio en USD |
+| `#nohay <pedido o teléfono> <producto>` | Asesor | El producto no está; recién ahí se le dice al cliente |
 | `#pagado <pedido>` | Asesor, por WhatsApp | Confirma el pago, descuenta una vez y le avisa al cliente |
 | `#rechazar <pedido>` | Asesor | El comprobante no sirve. Si ya se había descontado, se devuelve |
 | `POST /api/orders/<id>/pago` | Panel, en esta PC | Lo mismo, con `{ "ok": true }` o `{ "ok": false }` |

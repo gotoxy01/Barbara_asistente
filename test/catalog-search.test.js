@@ -23,7 +23,7 @@ describe('búsqueda de harina PAN', () => {
     const reply = replyIfInventedSku('La harina pan no la tenemos disponible.', [
       { name: 'get_price', result: { ok: false, sku_desconocido: true } },
     ]);
-    assert.match(reply, /verificar/i);
+    assert.match(reply, /verificando si lo tenemos en stock/i);
   });
 
   it('un 404 del modelo se puede reemplazar por el respaldo', () => {

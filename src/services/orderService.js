@@ -3,8 +3,9 @@ import { config } from '../config.js';
 import { publishCrm } from '../crm/events.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
-import { findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
+import { catalogCustomerReply, catalogOverviewText, findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
 import { buildPriceResult, buildStockResult } from './priceTools.js';
+import { STOCK_CHECK_REPLY, isGenericCatalogQuery } from './customerText.js';
 import { closeTicketsForPhone } from './ticketStore.js';
 import { applyAction } from './orderBook.js';
 import { customerLogisticsReply } from './orderLifecycle.js';
@@ -333,6 +334,49 @@ function matchPendingByTicket(pending, ticketItems) {
   return matched;
 }
 
+async function orderFromTarget(target) {
+  const digits = String(target || '').replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.length <= 7) {
+    const byId = await db.getOrderById(Number(digits));
+    if (byId && byId.lifecycle !== 'cancelado') return byId;
+  }
+  return (await db.getCommercialOrder(digits)) || (await db.getActiveOrder(digits));
+}
+
+/** El asesor confirmó que el producto sí está y pasó el precio en USD. */
+export async function applyConfirmedStock(target, productName, usd, bcv) {
+  const order = await orderFromTarget(target);
+  if (!order) return { error: 'No encontré ese pedido o ese cliente.' };
+  const needle = String(productName || '').toLowerCase();
+  let item = order.items.find((entry) => entry.verificacion && String(entry.nombre || '').toLowerCase().includes(needle))
+    || order.items.find((entry) => entry.precio == null && String(entry.nombre || entry.detalle || '').toLowerCase().includes(needle));
+  if (!item) {
+    item = { nombre: productName, presentacion: 'confirmado en tienda', detalle: productName, precio: round2(usd), cantidad: 1, verificacion: false, botellon: false };
+    order.items.push(item);
+  } else {
+    item.precio = round2(usd);
+    item.verificacion = false;
+    item.pesable = false;
+    item.presentacion = 'confirmado en tienda';
+  }
+  await db.saveOrder(order);
+  const price = bcv ? `Bs. ${toBolivares(usd, bcv.rate).toFixed(2)} (o $ ${usd.toFixed(2)} USD)` : `$ ${usd.toFixed(2)} USD`;
+  return { order, message: `Sí lo tenemos: *${item.nombre}* quedó anotado en ${price}. ¿Desea agregar algo más?` };
+}
+
+/** El asesor confirmó que ese producto no está. Solo entonces se lo decimos al cliente. */
+export async function applyRejectedStock(target, productName) {
+  const order = await orderFromTarget(target);
+  if (!order) return { error: 'No encontré ese pedido o ese cliente.' };
+  const needle = String(productName || '').toLowerCase();
+  const before = order.items.length;
+  order.items = order.items.filter((entry) => !String(entry.nombre || entry.detalle || '').toLowerCase().includes(needle));
+  if (order.items.length === before) return { error: `No está "${productName}" en el pedido #${order.id}.` };
+  await db.saveOrder(order);
+  return { order, message: `Le confirmo que *${productName}* no lo tenemos en este momento. ¿Le ofrezco otra cosa?` };
+}
+
 /** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
 export async function applyNotAvailable(phone, bcv, { ticketItems = null } = {}) {
   const order = await db.getActiveOrder(phone);
@@ -517,7 +561,18 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
 
   const handlers = {
     async search_catalog({ consulta }) {
-      const found = await searchProducts(String(consulta || customerText || ''), {});
+      const query = String(consulta || customerText || '');
+      if (isGenericCatalogQuery(query)) {
+        return {
+          ok: true,
+          general: true,
+          productos: [],
+          resumen: catalogOverviewText(),
+          respuesta_sugerida: catalogCustomerReply(),
+          instruccion: 'Es una pregunta general del catálogo. No llame de nuevo a search_catalog. Liste las categorías del resumen. confianza 100. requiere_especialista false. No diga que no hay.',
+        };
+      }
+      const found = await searchProducts(query, {});
       const productos = (found.products || []).slice(0, 5).map((product) => ({
         sku: product.sku,
         nombre: `${product.nombre} (${product.presentacion})`,
@@ -554,10 +609,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         };
       }
       if (!found.product) {
-        return {
-          error: `"${producto}" no está en el catálogo.`,
-          instruccion: 'Diga que por ahora no lo tenemos. Si en el contexto del catálogo hay SUGERENCIAS CERCANAS, ofrezca UNA. No invente productos fuera del catálogo.',
-        };
+        return handlers.verificar_stock({ producto: String(producto || '').trim(), cantidad: qty });
       }
 
       const p = found.product;
@@ -566,8 +618,11 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         p.precio = Number(live.price);
         p.stock = live.stock;
       }
+      if (p.stock == null) {
+        return handlers.verificar_stock({ producto: p.nombre, cantidad: qty });
+      }
       if (p.stock === 0) {
-        return { error: `"${p.nombre}" está sin stock.`, instruccion: 'Diga que por ahora no hay y no lo agregue al pedido.' };
+        return handlers.verificar_stock({ producto: p.nombre, cantidad: qty });
       }
       // Auditoría dura: no agregar algo que el cliente no pidió en este turno (evita arrastrar pedidos viejos).
       if (customerText && !customerMentionsProduct(p.nombre, customerText) && !customerMentionsProduct(producto, customerText)) {
@@ -605,6 +660,47 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         ? `Calculado: $ ${moneyUsd.toFixed(2)} ÷ $ ${p.precio}/kg = ${addQty} kg (sin molestar al encargado).`
         : undefined;
       return { ok: true, agregado: `${addQty} x ${productLabel(p)}`, ...(nota ? { nota } : {}), pedido: summarize(order, bcv) };
+    },
+
+    async verificar_stock({ producto, cantidad }) {
+      const nombre = String(producto || '').trim();
+      if (!nombre || isGenericCatalogQuery(nombre)) {
+        return {
+          ok: true,
+          general: true,
+          respuesta_sugerida: catalogCustomerReply(),
+          instruccion: 'No es un producto concreto. Responda con las categorías. No escale.',
+        };
+      }
+      const qty = Number(cantidad) > 0 ? Number(cantidad) : 1;
+      const detalle = qty === 1 ? nombre : `${nombre} (${qty})`;
+      const order = await db.getOrCreateActiveOrder(phone);
+      order.items.push({
+        nombre, presentacion: 'por verificar', detalle, precio: null, cantidad: qty,
+        verificacion: true, pesable: true, botellon: false,
+      });
+      order.status = 'abierto';
+      order.lifecycle = order.lifecycle && order.lifecycle !== 'borrador' ? order.lifecycle : 'borrador';
+      await db.saveOrder(order);
+      state.cartChanged = true;
+      state.consulted.push({ nombre, tipo: 'verificacion' });
+      await notify(
+        [
+          `Verificar stock: *${detalle}*`,
+          `Cliente: ${name || 'Sin nombre'} (+${phone})`,
+          order.id ? `Pedido #${order.id}` : null,
+          customerText ? `Escribió: "${String(customerText).slice(0, 240)}"` : null,
+          `Si lo hay: #hay ${order.id || phone} ${nombre} <precio USD>`,
+          `Si no lo hay: #nohay ${order.id || phone} ${nombre}`,
+        ].filter(Boolean).join('\n'),
+        { kind: 'weigh', phone, title: `Verificar stock: ${nombre}`, whatsapp: true },
+      );
+      return {
+        ok: true,
+        verificacion: true,
+        respuesta_cliente: STOCK_CHECK_REPLY,
+        instruccion: `Responda exactamente: "${STOCK_CHECK_REPLY}" No diga que no hay. El chat sigue abierto para el resto del pedido.`,
+      };
     },
 
     async solicitar_pesaje({ producto, cantidad }) {
@@ -802,8 +898,30 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
    * y se ahorra una segunda llamada a Gemini (varios segundos).
    */
   function finalize(calls) {
+    if (!calls.length) return null;
+    const checks = calls.filter((call) => call.result?.verificacion);
+    const added = calls.filter((call) => call.name === 'agregar_producto' && call.result?.ok);
+    const onlyCart = calls.every((call) => call.result?.verificacion || (call.name === 'agregar_producto' && call.result?.ok));
+    if (onlyCart && (checks.length || added.length)) {
+      const parts = [];
+      if (checks.length) parts.push(STOCK_CHECK_REPLY);
+      if (added.length) parts.push(`Anoté: ${added.map((call) => call.result.agregado).join(', ')}. ¿Desea agregar algo más?`);
+      return parts.join('\n\n');
+    }
+    const prices = calls.filter((call) => call.name === 'get_price' && call.result?.ok);
+    const onlyLookup = calls.every((call) => ['get_price', 'get_stock', 'search_catalog'].includes(call.name));
+    if (prices.length && onlyLookup && !calls.some((call) => call.result?.general)) {
+      const lines = prices.map((call) => {
+        const row = call.result;
+        const money = row.precio_bs != null
+          ? `Bs. ${Number(row.precio_bs).toFixed(2)} (o $ ${Number(row.precio_usd).toFixed(2)} USD)`
+          : `$ ${Number(row.precio_usd).toFixed(2)} USD`;
+        return `*${row.nombre}*${row.presentacion ? ` (${row.presentacion})` : ''}: ${money}`;
+      });
+      return `${lines.join('\n')}\n\n¿Cuántos desea?`;
+    }
     const terminal = new Set(['generar_boleta', 'registrar_direccion']);
-    if (!calls.length || !calls.every((c) => terminal.has(c.name) && c.result?.ok)) return null;
+    if (!calls.every((call) => terminal.has(call.name) && call.result?.ok)) return null;
 
     const address = calls.find((c) => c.name === 'registrar_direccion');
     if (address) {

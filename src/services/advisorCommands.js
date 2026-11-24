@@ -3,7 +3,7 @@ import * as db from '../db.js';
 import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
-import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { applyConfirmedStock, applyNotAvailable, applyRejectedStock, applyWeighedPrice, pendingWeighItems } from './orderService.js';
 import { applyAction } from './orderBook.js';
 import { getTicket } from './ticketStore.js';
 
@@ -11,8 +11,10 @@ const HELP =
   '*Comandos del asesor*\n' +
   '#precio <monto>: precio en USD de lo que pesó o consultó (responda a la alerta de caja)\n' +
   '#precio <teléfono> <monto>: igual, indicando el cliente\n' +
+  '#hay <pedido|teléfono> <producto> <precio>: sí lo hay; se anota con ese precio en USD\n' +
   '#nohay: avisar al cliente que no hay lo que consultó (responda a la alerta de caja)\n' +
   '#nohay <teléfono>: igual, indicando el cliente\n' +
+  '#nohay <pedido|teléfono> <producto>: no hay ese producto que se estaba verificando\n' +
   '#b: ver los pedidos pendientes\n' +
   '#b <teléfono>: borrar el pedido pendiente de ese cliente\n' +
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
@@ -40,6 +42,34 @@ function phoneFromAlert(text) {
   return t.match(/Cliente:\*?\s*\+?(\d{8,15})/)?.[1]
     ?? t.match(/\+(\d{8,15})/)?.[1]
     ?? null;
+}
+
+async function handleHay(body) {
+  const match = body.match(/^#hay\s+(\S+)\s+(.+)\s+(\d+(?:[.,]\d{1,2})?)\s*$/i);
+  if (!match) {
+    await ack('Formato: #hay <pedido o teléfono> <producto> <precio USD>. Ejemplo: #hay 12 leche 1.80');
+    return;
+  }
+  const usd = Number(match[3].replace(',', '.'));
+  if (!(usd > 0)) {
+    await ack('El precio en USD debe ser mayor que cero.');
+    return;
+  }
+  const result = await applyConfirmedStock(match[1], match[2].trim(), usd, await getBcvRate());
+  if (result.error || !result.order) {
+    await ack(result.error || 'No se pudo anotar el producto.');
+    return;
+  }
+  await deliverToCustomer(result.order.phone, result, `✅ ${match[2].trim()} a $ ${usd.toFixed(2)} anotado para +${result.order.phone}.`);
+}
+
+async function handleNoHayProduct(target, productName) {
+  const result = await applyRejectedStock(target, productName);
+  if (result.error || !result.order) {
+    await ack(result.error || 'No se pudo actualizar el pedido.');
+    return;
+  }
+  await deliverToCustomer(result.order.phone, result, `✅ Se le avisó a +${result.order.phone} que no está ${productName}.`);
 }
 
 async function handlePrice(body, quotedBody) {
@@ -185,12 +215,22 @@ async function deliverToCustomer(phone, result, confirmation) {
  */
 export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   const text = String(body ?? '').trim();
+  if (/^#hay\b/i.test(text)) {
+    await handleHay(text);
+    return true;
+  }
   if (/^#precio\b/i.test(text)) {
     await handlePrice(text, quotedBody);
     return true;
   }
   if (/^#no\s?hay\b/i.test(text)) {
-    await handleNotAvailable(text.replace(/^#no\s?hay/i, '#nohay'), quotedBody);
+    const normalized = text.replace(/^#no\s?hay/i, '#nohay');
+    const specific = normalized.match(/^#nohay\s+(\S+)\s+(.+)$/i);
+    if (specific && !/^\d+(?:[.,]\d+)?$/.test(specific[2].trim())) {
+      await handleNoHayProduct(specific[1], specific[2].trim());
+      return true;
+    }
+    await handleNotAvailable(normalized, quotedBody);
     return true;
   }
   if (/^#b(orrar)?\b/i.test(text)) {
