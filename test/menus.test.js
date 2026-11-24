@@ -59,7 +59,9 @@ describe('menús de WhatsApp', () => {
     }));
     const page = productMenu(many, 'Víveres', 0, rate);
     assert.equal(page.options.length, LIMITS.maxRows);
-    assert.equal(page.options.at(-1).id, 'menu:page:viveres:1');
+    assert.ok(page.options.some((row) => row.id === 'menu:page:viveres:1'));
+    assert.ok(page.options.some((row) => row.id === 'menu:todo'));
+    assert.equal(page.options.at(-1).id, 'menu:back');
     assert.deepEqual(validateMenu(page), []);
     assert.ok(page.options[0].title.length <= LIMITS.listTitle);
     assert.ok(page.options[0].description.length <= LIMITS.listDescription);
@@ -86,5 +88,31 @@ describe('menús de WhatsApp', () => {
     assert.match(seen[6].text, /TOTAL A PAGAR/);
     assert.match(seen[6].text, /Torre La Noria/);
     assert.equal(seen.some((step) => step.text.includes('[BOLETA]')), false);
+    assert.equal(seen.filter((step) => step.text.includes('¿Cómo lo entregamos?')).length, 1);
+  });
+
+  it('se puede cerrar o volver desde las categorías, y modificar reemplaza la cantidad', () => {
+    const cats = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:productos', { products, rate, order: { items: [] } });
+    assert.ok(cats.menu.options.some((row) => row.id === 'menu:todo'));
+    assert.ok(cats.menu.options.some((row) => row.id === 'menu:buscar'));
+    assert.ok(cats.menu.options.some((row) => row.title.includes('Volver')));
+    assert.equal((cats.text.match(/Elija una/gi) || []).length, 1);
+
+    const harina = { sku: 'harina-ama', nombre: 'Harina PAN amarilla', presentacion: '1 kg', precio: 1.8, categoria: 'Víveres' };
+    let order = { items: [{ ...harina, cantidad: 1 }], address: null };
+    const edit = reduceMenu({ menu: boletaMenuSafe(), awaiting: null, mode: 'add' }, 'menu:modificar', { products: [harina], rate, order });
+    const changed = reduceMenu(edit.session, 'menu:edit:0', { products: [harina], rate, order: edit.order });
+    const replaced = reduceMenu(changed.session, 'menu:qty:1', { products: [harina], rate, order: changed.order });
+    assert.equal(replaced.order.items.length, 1);
+    assert.equal(replaced.order.items[0].cantidad, 1);
+    assert.match(replaced.text, /ahora lleva 1/);
+
+    const summed = reduceMenu({ ...replaced.session, mode: 'add', sku: harina.sku }, 'menu:qty:1', { products: [harina], rate, order: replaced.order });
+    assert.equal(summed.order.items[0].cantidad, 2);
+    assert.match(summed.text, /Ya tenía 1, ahora lleva 2/);
   });
 });
+
+function boletaMenuSafe() {
+  return { kind: 'buttons', body: 'boleta', options: [{ id: 'menu:modificar', title: 'Modificar pedido' }] };
+}

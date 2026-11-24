@@ -96,7 +96,14 @@ while (true) {
   }
 
   const started = performance.now();
-  const result = await handleCustomerMessage({ phone, name, text }, { notify: printNotice });
+  const result = await handleCustomerMessage({ phone, name, text }, {
+    notify: printNotice,
+    onWait: async (kind) => {
+      console.log(kind === 'stock'
+        ? 'Un momento, por favor. Le confirmo con el vendedor. ⏳'
+        : 'Un momento, por favor. ⏳');
+    },
+  });
   const elapsed = ((performance.now() - started) / 1000).toFixed(1);
   if (result.error?.kind === 'billing') {
     console.error('  Aviso: Gemini está sin créditos (429). Recargue el plan en Google AI Studio. El cliente ya recibió el aviso amable; no se escala otra vez por 10 minutos.');

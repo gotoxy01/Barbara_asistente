@@ -9,7 +9,7 @@ export const LIMITS = {
   listDescription: 72,
   maxButtons: 3,
   maxRows: 10,
-  pageSize: 9,
+  pageSize: 7,
 };
 
 export const LABELS = {
@@ -22,7 +22,10 @@ export const LABELS = {
   cantidad2: '2',
   otraCantidad: 'Otra cantidad',
   agregarOtro: 'Agregar otro',
-  esTodo: 'Es todo',
+  esTodo: 'Ya es todo',
+  volver: '⬅️ Volver',
+  buscar: '🔎 Buscar',
+  quitar: 'Quitar uno',
   delivery: 'Delivery',
   retiro: 'Retiro en tienda',
   usarDireccion: 'Usar esta dirección',
@@ -97,44 +100,85 @@ export function groupName(product) {
   return product?.categoria || 'Otros';
 }
 
+function controls({ moreId = null, backId = 'menu:back' } = {}) {
+  const rows = [];
+  if (moreId) rows.push({ id: moreId, title: LABELS.verMas });
+  rows.push({ id: 'menu:todo', title: LABELS.esTodo });
+  rows.push({ id: backId, title: LABELS.volver });
+  return rows;
+}
+
 export function categoryMenu(products) {
   const names = [...new Set((products || []).map(groupName))];
-  return listMenu('Estas son las categorías. Elija una:', names.map((name) => ({
+  const room = LIMITS.maxRows - 3;
+  const rows = names.slice(0, room).map((name) => ({
     id: `menu:cat:${slug(name)}`,
     title: name,
-  })));
+  }));
+  rows.push({ id: 'menu:buscar', title: LABELS.buscar });
+  rows.push(...controls());
+  return listMenu('Estas son las categorías. Elija una:', rows);
 }
 
 export function productMenu(products, group, page = 0, rate = 0) {
   const all = (products || []).filter((product) => slug(groupName(product)) === slug(group));
+  const more = (all.length - page * LIMITS.pageSize) > LIMITS.pageSize;
+  const reserved = more ? 3 : 2;
+  const room = LIMITS.maxRows - reserved;
   const start = page * LIMITS.pageSize;
-  const slice = all.slice(start, start + LIMITS.pageSize);
+  const slice = all.slice(start, start + room);
   const rows = slice.map((product) => ({
     id: `menu:sku:${product.sku}`,
     title: product.nombre,
     description: `${product.presentacion} · ${moneyLine(product.precio, rate)}`,
   }));
-  if (start + LIMITS.pageSize < all.length) {
-    rows.push({ id: `menu:page:${slug(group)}:${page + 1}`, title: LABELS.verMas });
-  }
+  rows.push(...controls({
+    moreId: more ? `menu:page:${slug(group)}:${page + 1}` : null,
+  }));
   return listMenu(page ? `Más productos de ${group}:` : `Productos de ${group}:`, rows);
 }
 
 export function matchMenu(products, rate = 0) {
-  const rows = (products || []).slice(0, LIMITS.pageSize).map((product) => ({
+  const all = products || [];
+  const rows = all.slice(0, LIMITS.maxRows - 2).map((product) => ({
     id: `menu:sku:${product.sku}`,
     title: product.nombre,
     description: `${product.presentacion} · ${moneyLine(product.precio, rate)}`,
   }));
+  rows.push(...controls());
   return listMenu('Encontré varias opciones. ¿Cuál desea?', rows);
 }
 
 export function quantityMenu(productName) {
-  return buttonMenu(`¿Cuántos de ${productName}?`, [
+  return listMenu(`¿Cuántos de ${productName}?`, [
     { id: 'menu:qty:1', title: LABELS.cantidad1 },
     { id: 'menu:qty:2', title: LABELS.cantidad2 },
     { id: 'menu:qty:otra', title: LABELS.otraCantidad },
+    { id: 'menu:back', title: LABELS.volver },
   ]);
+}
+
+export function modifyMenu(order) {
+  const rows = (order?.items || []).slice(0, 6).map((item, index) => ({
+    id: `menu:edit:${index}`,
+    title: item.nombre,
+    description: `Lleva ${item.cantidad}. Toque para cambiar la cantidad.`,
+  }));
+  rows.push({ id: 'menu:otro', title: LABELS.agregarOtro });
+  rows.push({ id: 'menu:quitar', title: LABELS.quitar });
+  rows.push({ id: 'menu:todo', title: LABELS.esTodo });
+  rows.push({ id: 'menu:back', title: LABELS.volver });
+  return listMenu('¿Qué desea modificar?', rows.slice(0, LIMITS.maxRows));
+}
+
+export function removeMenu(order) {
+  const rows = (order?.items || []).slice(0, LIMITS.maxRows - 1).map((item, index) => ({
+    id: `menu:drop:${index}`,
+    title: item.nombre,
+    description: `Quitar ${item.cantidad}`,
+  }));
+  rows.push({ id: 'menu:back', title: LABELS.volver });
+  return listMenu('¿Cuál producto quito del pedido?', rows);
 }
 
 export function afterAddMenu() {
@@ -147,15 +191,17 @@ export function afterAddMenu() {
 
 export function deliveryMenu(savedAddress) {
   if (savedAddress) {
-    return buttonMenu('¿La enviamos a la dirección que ya tenemos o escribe otra?', [
-      { id: 'menu:dir:usar', title: LABELS.usarDireccion },
+    return listMenu('¿La enviamos a la dirección guardada?', [
+      { id: 'menu:dir:usar', title: LABELS.usarDireccion, description: savedAddress },
       { id: 'menu:dir:otra', title: LABELS.otraDireccion },
       { id: 'menu:retiro', title: LABELS.retiro },
+      { id: 'menu:back', title: LABELS.volver },
     ]);
   }
   return buttonMenu('¿Cómo lo entregamos?', [
     { id: 'menu:delivery', title: LABELS.delivery },
     { id: 'menu:retiro', title: LABELS.retiro },
+    { id: 'menu:back', title: 'Volver' },
   ]);
 }
 
@@ -223,10 +269,19 @@ export function renderMenuText(menu) {
   return lines.join('\n');
 }
 
+/** Un solo texto: si la nota y el cuerpo del menú dicen lo mismo, no se repite. */
+export function mergeMenuText(text, menu) {
+  if (!menu?.options?.length) return String(text || '').trim();
+  const note = String(text || '').trim();
+  const body = String(menu.body || '').trim();
+  const merged = !note
+    ? body
+    : (!body || note === body || note.includes(body) || body.includes(note))
+      ? (note.length >= body.length ? note : body)
+      : `${note}\n\n${body}`;
+  return renderMenuText({ ...menu, body: merged });
+}
+
 export function withMenu(text, menu) {
-  const body = String(text || '').trim();
-  const rendered = renderMenuText(menu);
-  if (!rendered) return body;
-  if (!body) return rendered;
-  return `${body}\n\n${rendered}`;
+  return mergeMenuText(text, menu);
 }

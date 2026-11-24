@@ -334,7 +334,7 @@ export function handleCustomerMessage(message, options) {
   return lockPhone(message.phone, () => handleCustomerMessageNow(message, options));
 }
 
-async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor } = {}) {
+async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor, onWait = null } = {}) {
   let chat = await db.upsertChat(phone, name);
   await db.touchCustomerWindow(phone);
   chat = await db.getChat(phone);
@@ -386,7 +386,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
 
   const history = historyForModel(await db.getHistory(phone, config.historyLimit, config.newConversationHours));
-  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
+  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
 
@@ -405,7 +405,7 @@ async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
 /**
  * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
  */
-async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
+async function produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait = null, resume = false }) {
   history = historyForModel(history);
   const turnStarted = Date.now();
   const timings = [];
@@ -421,7 +421,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   };
   let mark = turnStarted;
   const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
-  const menuTurn = await takeMenuTurn(phone, text);
+  const menuTurn = await takeMenuTurn(phone, text, null, onWait);
   if (menuTurn?.reply) {
     timings.push({ step: 'menú', ms: Date.now() - turnStarted });
     timings.push({ step: 'Gemini', ms: 0, skipped: true });
@@ -509,6 +509,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   const pendingBefore = pendingWeighItems((await db.getActiveOrder(phone))?.items ?? []).length;
   try {
     verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini${lightTurn ? ' (sin herramientas ni auditor)' : ''}.`);
+    if (onWait) await onWait('modelo');
     const result = await generateBarbaraReply(systemPrompt, scopedHistory, lightTurn ? undefined : tools);
     mark = lap('Gemini', mark);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
