@@ -97,6 +97,22 @@ npm test
 
 `npm run chat` no espera los 3,5 s con los que WhatsApp junta mensajes seguidos, e imprime el tiempo de cada paso (tasa, catálogo, modelo). `--nuevo`, o el comando `borrar` dentro del chat, limpia la conversación del cliente de prueba para que no quede una respuesta vieja.
 
+## 4.1 Pedido, pago y entrega
+
+El pedido se guarda en Postgres desde el primer producto. No depende del chat ni de la memoria del proceso.
+
+Estados: `borrador` → `boleta_enviada` → `pago_reportado` → `pago_verificado` → `en_logistica` → `entregado`, o `cancelado`. Cada cambio queda en `order_events`. Un pago reportado no se borra al cumplirse `ORDER_MEMORY_HOURS`.
+
+El inventario de la caja (`database.db`) no se modifica. Al verificar el pago se anota una sola vez en `stock_ledger` (y al cancelar, se anota la devolución). Ese libro es lo que hay que ajustar en la caja.
+
+| Comando | Quién | Efecto |
+| --- | --- | --- |
+| `#pagado <pedido>` | Asesor, por WhatsApp | Confirma el pago, descuenta una vez y le avisa al cliente |
+| `#rechazar <pedido>` | Asesor | El comprobante no sirve. Si ya se había descontado, se devuelve |
+| `POST /api/orders/<id>/pago` | Panel, en esta PC | Lo mismo, con `{ "ok": true }` o `{ "ok": false }` |
+
+En `npm run chat`, el cliente puede escribir la dirección, `pagué referencia 12345678` o `/ubicacion 10.48,-66.90`. El asesor de prueba usa `!pagado <pedido>` y `!rechazar <pedido>`.
+
 ## 5. Respaldo con código QR
 
 `npm run start:qr` abre WhatsApp Web. No es la API oficial: el teléfono del negocio debe quedar vinculado y la PC encendida. Úselo si Cloud todavía no está listo. El panel y el catálogo funcionan igual. La ventana de 24 horas y las plantillas aplican al canal Cloud.

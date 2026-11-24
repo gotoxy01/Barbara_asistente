@@ -21,6 +21,7 @@ import {
   noteSetPrice,
 } from '../services/notesService.js';
 import { applyNotAvailable, applyWeighedPrice } from '../services/orderService.js';
+import { applyAction } from '../services/orderBook.js';
 import { subscribeCrm } from './events.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -95,6 +96,31 @@ function createApp() {
       });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}. ¿WhatsApp ya está conectado?` });
+    }
+  });
+
+  app.post('/api/orders/:id/pago', async (req, res) => {
+    const order = await db.getOrderById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Pedido no encontrado' });
+    try {
+      const reduced = await applyAction(order.phone, {
+        type: req.body?.ok === false ? 'reject_payment' : 'verify_payment',
+        orderId: order.id,
+        actor: 'operador',
+      });
+      if (reduced.error) return res.status(400).json({ error: reduced.error });
+      if (reduced.customerReply) {
+        const sent = await sendMessage(order.phone, reduced.customerReply);
+        await db.addMessage(order.phone, 'model', outboundRecord(sent, reduced.customerReply));
+      }
+      return res.json({
+        ok: true,
+        lifecycle: reduced.order.lifecycle,
+        inventario: reduced.ledger?.action || null,
+        aviso: 'El descuento queda en stock_ledger. Hay que ajustarlo en la caja; Bárbara no escribe en database.db.',
+      });
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
     }
   });
 

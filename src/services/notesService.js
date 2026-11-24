@@ -10,6 +10,7 @@ import {
   renderBoleta,
   renderPagoMovil,
 } from './orderService.js';
+import { applyAction } from './orderBook.js';
 import {
   clearEditingTicket,
   closeTicketsForPhone,
@@ -423,9 +424,19 @@ export async function notePayment(ticketId, { ok, mensaje } = {}) {
   if (!ticket) return { error: 'Nota no encontrada' };
   if (ticket.estado === 'CERRADO') return { error: 'Esta nota ya fue atendida' };
 
-  const message = String(mensaje || '').trim() || (ok
-    ? '✅ Recibimos su comprobante. Su pedido será despachado en breve. 🛵'
-    : 'Disculpe, no pudimos validar el comprobante. ¿Podría enviarlo de nuevo, por favor? 🙏');
+  let message = String(mensaje || '').trim();
+  if (!message && ticket.clienteTelefono) {
+    const reduced = await applyAction(ticket.clienteTelefono, {
+      type: ok ? 'verify_payment' : 'reject_payment',
+      actor: 'operador',
+    });
+    if (!reduced.error && reduced.customerReply) message = reduced.customerReply;
+  }
+  if (!message) {
+    message = ok
+      ? 'El asesor confirmó su pago. Gracias por comprar en *Abasto Los Cuchos*.'
+      : 'Disculpe, no pudimos validar el comprobante. El pago no está confirmado. ¿Podría enviarlo de nuevo, por favor?';
+  }
 
   return deliverAndClose(ticket, message, ['payment']);
 }

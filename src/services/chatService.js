@@ -8,6 +8,9 @@ import { historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrCont
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
 import { catalogOverviewText, searchProducts } from './catalogService.js';
+import { isOperationalTurn } from './orderLifecycle.js';
+import { loadProfileSummary } from './orderBook.js';
+import { tryOperationalTurn } from './operationalTurn.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
@@ -99,6 +102,7 @@ function kindLabel(kind) {
     paused: 'Chat pausado',
     tech: 'Falla técnica',
     order: 'Nuevo pedido',
+    logistica: 'Entrega',
     info: 'Aviso',
   })[kind] || 'Aviso';
 }
@@ -242,6 +246,16 @@ async function buildProductContext(history, bcv, currentText = '') {
       text: 'CONSULTA GENERAL (saludo o comando): no mencione productos ni diga que no hay.',
     };
   }
+  if (isOperationalTurn(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      operational: true,
+      text: 'TURNO DE PEDIDO (dirección, pago, ubicación o cierre). No busque productos ni escale por el catálogo.',
+    };
+  }
   if (isGeneralCatalogAsk(currentText)) {
     return {
       type: 'none',
@@ -318,6 +332,14 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
   const displayName = chat.name || name;
 
+  if (chat.status === 'LOGISTICA') {
+    await notify(
+      `${displayName || '+' + phone} (+${phone}) escribió mientras se coordina la entrega:\n"${text}"`,
+      { kind: 'logistica', phone, title: 'Mensaje en logística', whatsapp: true },
+    );
+    return { reply: null, escalated: false, paused: true };
+  }
+
   if (chat.status === 'SPECIALIST' || chat.paused) {
     const modo = chat.status === 'SPECIALIST' ? 'en modo especialista' : 'pausado';
     await notify(
@@ -347,6 +369,8 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
 
 /** Limpia carrito abierto + notas de caja de este chat (pedidos recibidos en cocina no se tocan). */
 async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
+  const current = await db.getActiveOrder(phone);
+  if (current?.items?.length || db.orderIsProtected(current)) return;
   const cleared = await db.clearActiveCarts(phone);
   closeTicketsForPhone(phone);
   await db.startFreshActiveOrder(phone);
@@ -378,6 +402,28 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   // Conversación nueva: solo lo escrito después del último silencio largo. No se rellena con la respuesta vieja.
   const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
   const lightTurn = isLightTurn(text);
+  const customerProfile = await loadProfileSummary(phone, displayName).catch((err) => {
+    verbose(`No se pudo leer la memoria del cliente: ${err.message}`);
+    return '';
+  });
+
+  const fast = await tryOperationalTurn({ phone, name: displayName, text, bcv, notify });
+  if (fast?.reply) {
+    lap('operación', mark);
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+    return {
+      reply: enforceBusinessName(fast.reply),
+      escalated: false,
+      paused: false,
+      productContext: 'Turno de pedido, sin búsqueda de catálogo.',
+      toolCalls: fast.toolCalls || [],
+      model: null,
+      tools: null,
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+    };
+  }
 
   const products = await buildProductContext(scopedHistory, bcv, text);
   mark = lap('catálogo', mark);
@@ -385,7 +431,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   const customerText = customerTextWithThread(scopedHistory, text);
   const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
   const systemPrompt = buildSystemPrompt({
-    name: displayName, phone, productContext, orderContext: await renderOrderContext(phone, bcv), isNewConversation,
+    name: displayName, phone, productContext, orderContext: await renderOrderContext(phone, bcv), isNewConversation, customerProfile,
   });
 
   let reply;

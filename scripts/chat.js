@@ -21,6 +21,7 @@ const { addMessage, clearCustomerThread, initDb, resumeChat } = await import('..
 const { syncCatalog } = await import('../src/services/productSync.js');
 const { getCatalogInfo } = await import('../src/services/catalogService.js');
 const { finalizeHandoff, handleCustomerMessage } = await import('../src/services/chatService.js');
+const { applyAction, reloadOpenOrders } = await import('../src/services/orderBook.js');
 
 assertGeminiConfig();
 assertDatabaseConfig();
@@ -35,7 +36,11 @@ const catalog = getCatalogInfo();
 console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
 console.log('Chat de prueba con Bárbara (cliente: ' + name + ', +' + phone + ').');
 console.log('Sin la espera de 3,5 s de WhatsApp: aquí cada mensaje se responde al momento.');
-console.log('Escriba "salir" para terminar, "borrar" para limpiar el hilo, o "reanudar" / "#reanudar" si quedó con el especialista.\n');
+console.log('Escriba "salir" para terminar, "borrar" para limpiar el hilo, o "reanudar" / "#reanudar" si quedó con el especialista.');
+console.log('Ubicación de prueba: /ubicacion 10.4806,-66.9036');
+console.log('Como asesor: !pagado <pedido> o !rechazar <pedido> (no confirma el pago hasta ese paso).\n');
+const openOrders = await reloadOpenOrders();
+console.log(`Pedidos abiertos recuperados: ${openOrders.length}.`);
 
 if (process.argv.includes('--nuevo')) {
   const removed = await clearCustomerThread(phone);
@@ -57,6 +62,31 @@ while (true) {
   if (command === 'borrar' || command === 'nuevo') {
     const removed = await clearCustomerThread(phone);
     console.log(`Listo: se borraron ${removed} mensajes de +${phone}. La próxima pregunta no ve el historial anterior.\n`);
+    continue;
+  }
+  if (text.startsWith('!pagado') || text.startsWith('!rechazar')) {
+    const id = Number(text.replace(/\D/g, ''));
+    const { getOrderById } = await import('../src/db.js');
+    const order = await getOrderById(id);
+    if (!order) {
+      console.log('No encontré ese pedido.\n');
+      continue;
+    }
+    const reduced = await applyAction(order.phone, {
+      type: text.startsWith('!pagado') ? 'verify_payment' : 'reject_payment',
+      orderId: order.id,
+      actor: 'operador',
+    });
+    if (reduced.error) console.log(reduced.error + '\n');
+    else {
+      console.log(`Pedido #${order.id} quedó en ${reduced.order.lifecycle}.`);
+      if (reduced.ledger) console.log(`Inventario (${reduced.ledger.action}): ${JSON.stringify(reduced.ledger.lines)}. Ajuste la caja a mano.`);
+      else console.log('El inventario no se movió otra vez.');
+      if (reduced.customerReply) {
+        console.log(`\nBárbara (aviso al cliente): ${reduced.customerReply}\n`);
+        await addMessage(order.phone, 'model', reduced.customerReply);
+      }
+    }
     continue;
   }
   if (command === 'reanudar') {

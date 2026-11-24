@@ -4,6 +4,7 @@ import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
 import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
+import { applyAction } from './orderBook.js';
 import { getTicket } from './ticketStore.js';
 
 const HELP =
@@ -17,6 +18,8 @@ const HELP =
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
   '#pausar <teléfono>: pasar el chat a especialista (Bárbara no responde hasta #reanudar)\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
+  '#pagado <pedido>: el pago ya se vio en el banco; descuenta el inventario una sola vez\n' +
+  '#rechazar <pedido>: el comprobante no sirve; si ya se había descontado, se devuelve\n' +
   '#ayuda: ver esta lista';
 
 const manualPauseMs = () => config.manualPauseMinutes * 60 * 1000;
@@ -71,10 +74,43 @@ function normalizePhone(raw) {
   return digits;
 }
 
+async function settlePayment(command, token) {
+  const digits = String(token || '').replace(/\D/g, '');
+  const order = digits && digits.length <= 7
+    ? await db.getOrderById(Number(digits))
+    : (digits ? await db.getCommercialOrder(digits) : null);
+  if (!order) {
+    await ack('No encontré ese pedido. Use #pagado <número> o #rechazar <número>.');
+    return;
+  }
+  const reduced = await applyAction(order.phone, {
+    type: command === 'pagado' ? 'verify_payment' : 'reject_payment',
+    orderId: order.id,
+    actor: 'operador',
+  });
+  if (reduced.error) {
+    await ack(reduced.error);
+    return;
+  }
+  if (reduced.customerReply) {
+    try {
+      const sent = await sendMessage(order.phone, reduced.customerReply);
+      await recordAdvisorMessage(order.phone, outboundRecord(sent, reduced.customerReply));
+    } catch (err) {
+      await ack(`El pedido #${order.id} quedó en ${reduced.order.lifecycle}, pero no se pudo avisar al cliente: ${err.message}`);
+      return;
+    }
+  }
+  const moved = reduced.ledger
+    ? ` Inventario en el libro de Bárbara (${reduced.ledger.action}): ${(reduced.ledger.lines || []).map((line) => `${line.cantidad} ${line.nombre}`).join(', ') || 'sin líneas'}. Hay que ajustarlo en la caja; este programa no escribe en database.db.`
+    : ' El inventario no se movió otra vez.';
+  await ack(`Pedido #${order.id} quedó en ${reduced.order.lifecycle}.${moved}`);
+}
+
 function describeOrder(o) {
   const count = o.items.length;
   const total = o.total_usd != null ? ` - $ ${o.total_usd.toFixed(2)}` : '';
-  const state = { abierto: 'armando', boleta: 'boleta enviada', recibido: 'registrado' }[o.status] ?? o.status;
+  const state = o.lifecycle || ({ abierto: 'armando', boleta: 'boleta enviada', recibido: 'registrado' }[o.status] ?? o.status);
   return `Pedido #${o.id} (${state}): ${count} producto${count === 1 ? '' : 's'}${total}`;
 }
 
@@ -171,6 +207,10 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
   switch (command.toLowerCase()) {
     case 'ayuda':
       await ack(HELP);
+      return true;
+    case 'pagado':
+    case 'rechazar':
+      await settlePayment(command, rawPhone || rest);
       return true;
     case 'pausar':
       if (!phone) break;

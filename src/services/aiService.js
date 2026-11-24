@@ -43,11 +43,14 @@ export function greetingForNow() {
  * reutilizar el prefijo en caché (caché implícita) y responder más rápido.
  * @param {{ name?: string, phone?: string, productContext: string, orderContext?: string }} session
  */
-export function buildSystemPrompt({ name, phone, productContext, orderContext, isNewConversation = false }) {
+export function buildSystemPrompt({ name, phone, productContext, orderContext, isNewConversation = false, customerProfile = '' }) {
   const staticPart = BARBARA_PROMPT.replace(KNOWLEDGE_BASE_MARKER, BUSINESS_INFO);
   const dynamicPart = [
     CATALOG_SECTION.replace('{CONTEXTO_PRODUCTOS}', productContext),
     ORDER_SECTION.replace('{PEDIDO_ACTUAL}', orderContext || 'El cliente aún no tiene productos en su pedido.'),
+    customerProfile
+      ? `## Memoria del cliente\n${customerProfile}\nSalúdalo por su nombre si lo conoces. Puedes ofrecer “¿Lo mismo de la vez pasada?”. Si hay una dirección guardada, confírmala antes de usarla. No digas que un pago está confirmado si el pedido no dice pago verificado.`
+      : '',
     SESSION_SECTION
       .replace('{NOMBRE_CLIENTE}', name || 'No indicado')
       .replace('{TELEFONO_CLIENTE}', phone ? `+${phone}` : 'No indicado')

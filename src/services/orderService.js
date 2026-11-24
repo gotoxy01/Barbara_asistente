@@ -6,6 +6,8 @@ import { toBolivares } from './bcvService.js';
 import { findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
 import { buildPriceResult, buildStockResult } from './priceTools.js';
 import { closeTicketsForPhone } from './ticketStore.js';
+import { applyAction } from './orderBook.js';
+import { customerLogisticsReply } from './orderLifecycle.js';
 
 export const BOLETA_MARKER = '[BOLETA]';
 /** Marca en el historial: a partir de aquí el carrito anterior ya no cuenta. */
@@ -588,10 +590,14 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
 
       const order = await db.getOrCreateActiveOrder(phone);
+      if (['pago_reportado', 'pago_verificado', 'en_logistica', 'entregado'].includes(order.lifecycle)) {
+        return { error: 'Ese pedido ya tiene un pago reportado. No se le agregan productos hasta que el asesor lo revise.' };
+      }
       const existing = order.items.find((i) => i.nombre === p.nombre && i.presentacion === p.presentacion);
       if (existing) existing.cantidad = round2(existing.cantidad + addQty);
-      else order.items.push({ nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
+      else order.items.push({ sku: p.sku || null, nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
       order.status = 'abierto';
+      order.lifecycle = 'borrador';
       await db.saveOrder(order);
       state.cartChanged = true;
       state.catalogAdded = true;
@@ -730,7 +736,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         };
       }
       const t = computeTotals(order.items, bcv);
-      Object.assign(order, { status: 'boleta', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
+      Object.assign(order, { status: 'boleta', lifecycle: 'boleta_enviada', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
       await db.saveOrder(order);
       state.boleta = renderBoleta(order.items, bcv);
       return {
@@ -742,7 +748,9 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async registrar_direccion({ direccion }) {
       const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
-      if (order.status !== 'boleta') return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
+      if (order.status !== 'boleta' && order.lifecycle !== 'boleta_enviada' && order.lifecycle !== 'pago_reportado') {
+        return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
+      }
       const raw = String(direccion ?? '').trim();
       const pickup = isPickupAddress(raw);
       if (!pickup && !hasHouseNumber(raw)) {
@@ -752,31 +760,28 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
           instruccion: 'NO registres el pedido todavía. Pida dirección con número de casa, o que escriba “retiro en tienda”. Sin eso el pedido no se cierra.',
         };
       }
-      const address = pickup ? '🏪 Retiro en tienda' : raw;
       const t = computeTotals(order.items, bcv, { pickup });
-      order.address = address;
-      order.status = 'recibido';
-      order.kitchen_status = 'nuevo';
-      order.total_usd = t.totalUsd;
-      order.total_bs = t.totalBs;
-      order.bcv_rate = t.rate ?? null;
-      await db.saveOrder(order);
+      const reduced = await applyAction(phone, { type: 'save_address', address: raw, totals: t, name });
+      if (reduced.error) return { error: reduced.error };
       state.addressSaved = true;
       state.pickup = pickup;
-
-      const boletaFinal = renderBoleta(order.items, bcv, { pickup });
-      await notify(
-        `Pedido #${order.id}\nCliente: ${name || 'Sin nombre'} (+${phone})\n${pickup ? 'Modalidad: RETIRO EN TIENDA' : `Dirección: ${order.address}`}\n\n${boletaFinal}`,
-        { kind: 'order', phone, title: `Comanda #${order.id}`, whatsapp: false },
-      );
+      state.logistics = Boolean(reduced.logistics);
+      if (reduced.notice) {
+        await notify(reduced.notice, {
+          kind: 'logistica', phone, title: `Logística pedido #${reduced.order.id}`, whatsapp: true,
+        });
+      }
       return {
         ok: true,
-        pedido_numero: order.id,
-        direccion: order.address,
+        pedido_numero: reduced.order.id,
+        direccion: reduced.order.address,
         pickup,
-        instruccion: pickup
-          ? 'Confirme que el pedido quedó registrado para RETIRO EN TIENDA (sin delivery) e incluya datos de Pago Móvil.'
-          : 'Confirme que el pedido fue registrado con esa dirección e incluya los datos de Pago Móvil.',
+        logistics: Boolean(reduced.logistics),
+        instruccion: reduced.logistics
+          ? 'El pago y la ubicación ya están. Diga que un agente coordinará la entrega. No diga que el pago está confirmado.'
+          : (pickup
+            ? 'La dirección quedó guardada como retiro en tienda. Pida el comprobante de pago. No diga que el pago está confirmado ni que ya salió a cocina.'
+            : 'La dirección quedó guardada. Pida el comprobante de pago. No diga que el pago está confirmado.'),
       };
     },
   };
@@ -802,13 +807,13 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
 
     const address = calls.find((c) => c.name === 'registrar_direccion');
     if (address) {
+      if (address.result.logistics) return customerLogisticsReply(name);
       const modo = address.result.pickup
         ? '🏪 *Modalidad:* Retiro en tienda (sin cargo de delivery)'
-        : `📍 *Dirección de entrega:* ${address.result.direccion}`;
-      return `¡Muchas gracias${name ? `, ${name.split(' ')[0]}` : ''}! ✅ Su pedido *#${address.result.pedido_numero}* fue registrado con éxito.\n\n` +
+        : `📍 *Dirección guardada:* ${address.result.direccion}`;
+      return `¡Gracias${name ? `, ${name.split(' ')[0]}` : ''}! Anoté la entrega del pedido *#${address.result.pedido_numero}*.\n\n` +
         `${modo}\n\n` +
-        'Si paga por Pago Móvil, envíenos la captura del pago por este chat. 🛵\n' +
-        'También puede pagar en efectivo (USD o Bs.). ¡Gracias por preferir *Abasto Los Cuchos*! 🙏';
+        'Cuando pague por Pago Móvil, envíe la captura y el número de referencia por este chat. El pago queda en verificación hasta que un asesor lo confirme. 🛵';
     }
     return `${BOLETA_MARKER}\n\n${ADDRESS_QUESTION}`;
   }

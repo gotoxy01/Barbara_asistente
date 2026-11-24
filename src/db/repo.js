@@ -1,7 +1,8 @@
 import { config } from '../config.js';
 import { publishCrm } from '../crm/events.js';
 import { runMigrations } from './migrate.js';
-import { closePool, openPool, query } from './pool.js';
+import { closePool, openPool, query, withTransaction } from './pool.js';
+import { isProtectedFromExpiry, legacyStatus, lifecycleFromLegacy, mergeLifecycle } from '../services/orderLifecycle.js';
 
 export const PROCESSED_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -34,8 +35,10 @@ function parseOrder(row) {
 }
 
 const ORDER_COLUMNS = `
-  id, phone, status, items, address, total_usd, total_bs, bcv_rate,
+  id, phone, status, lifecycle, items, address, total_usd, total_bs, bcv_rate,
   boleta_pendiente, kitchen_status, board_hidden,
+  payment_reference, payment_media_id, payment_note, fulfillment,
+  location_lat, location_lng, location_label, stock_deducted,
   ${ms('created_at')} AS created_at,
   ${ms('updated_at')} AS updated_at
 `;
@@ -370,12 +373,33 @@ function memoryCutoff() {
 
 export async function expireStaleOrders() {
   const cutoff = memoryCutoff();
-  const { rowCount } = await query(`
-    UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = NOW()
-    WHERE status IN ('abierto', 'boleta') AND updated_at < to_timestamp($1 / 1000.0)
+  const { rows } = await query(`
+    WITH old AS (
+      SELECT id, phone, lifecycle
+      FROM orders
+      WHERE status IN ('abierto', 'boleta')
+        AND lifecycle IN ('borrador', 'boleta_enviada')
+        AND payment_reference IS NULL
+        AND payment_media_id IS NULL
+        AND updated_at < to_timestamp($1 / 1000.0)
+    )
+    UPDATE orders SET
+      status = 'cancelado',
+      lifecycle = 'cancelado',
+      boleta_pendiente = 0,
+      updated_at = NOW()
+    FROM old
+    WHERE orders.id = old.id
+    RETURNING orders.id, old.phone, old.lifecycle
   `, [cutoff]);
-  if (rowCount) {
-    console.log(`Pedidos sin actividad por más de ${config.orderMemoryHours} h cancelados: ${rowCount}.`);
+  for (const row of rows) {
+    await query(`
+      INSERT INTO order_events (order_id, wa_id, from_state, to_state, actor, detail)
+      VALUES ($1, $2, $3, 'cancelado', 'sistema', '{"tipo":"vencido"}'::jsonb)
+    `, [row.id, row.phone, row.lifecycle]);
+  }
+  if (rows.length) {
+    console.log(`Pedidos sin pago y sin actividad por más de ${config.orderMemoryHours} h cancelados: ${rows.length}.`);
   }
   return cutoff;
 }
@@ -403,23 +427,48 @@ export async function getOrdersAwaitingWeight() {
 export async function getPendingOrders() {
   const cutoff = await expireStaleOrders();
   return ordersWhere(
-    `WHERE status IN ('abierto', 'boleta', 'recibido') AND items <> '[]'::jsonb AND updated_at >= to_timestamp($1 / 1000.0) ORDER BY id`,
+    `WHERE items <> '[]'::jsonb
+       AND lifecycle <> 'cancelado'
+       AND (
+         lifecycle IN ('pago_reportado', 'pago_verificado', 'en_logistica')
+         OR (status IN ('abierto', 'boleta', 'recibido') AND updated_at >= to_timestamp($1 / 1000.0))
+       )
+     ORDER BY id`,
     [cutoff],
   );
 }
 
 export async function cancelPendingOrders(phone) {
-  const orders = await ordersWhere(
-    `WHERE phone = $1 AND status IN ('abierto', 'boleta', 'recibido') ORDER BY id`,
-    [phone],
-  );
-  for (const order of orders) {
-    await query(`
-      UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, kitchen_status = 'cancelado', updated_at = NOW()
-      WHERE id = $1
-    `, [order.id]);
-  }
-  return orders;
+  return withTransaction(async (client) => {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [phone]);
+    const { rows } = await client.query(`
+      SELECT id, phone, lifecycle, items, stock_deducted
+      FROM orders
+      WHERE phone = $1 AND lifecycle NOT IN ('cancelado', 'entregado')
+      ORDER BY id
+      FOR UPDATE
+    `, [phone]);
+    for (const row of rows) {
+      if (row.stock_deducted) {
+        await client.query(`
+          INSERT INTO stock_ledger (order_id, action, lines)
+          VALUES ($1, 'restore', $2::jsonb)
+          ON CONFLICT (order_id, action) DO NOTHING
+        `, [row.id, JSON.stringify(row.items || [])]);
+      }
+      await client.query(`
+        UPDATE orders SET
+          status = 'cancelado', lifecycle = 'cancelado', boleta_pendiente = 0,
+          kitchen_status = 'cancelado', stock_deducted = FALSE, updated_at = NOW()
+        WHERE id = $1
+      `, [row.id]);
+      await client.query(`
+        INSERT INTO order_events (order_id, wa_id, from_state, to_state, actor, detail)
+        VALUES ($1, $2, $3, 'cancelado', 'barbara', '{"tipo":"cancelado"}'::jsonb)
+      `, [row.id, row.phone, row.lifecycle]);
+    }
+    return rows.map((row) => ({ id: Number(row.id), phone: row.phone, status: 'cancelado', items: row.items || [] }));
+  });
 }
 
 export async function clearActiveCarts(phone) {
@@ -429,7 +478,7 @@ export async function clearActiveCarts(phone) {
   );
   for (const order of orders) {
     await query(`
-      UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, kitchen_status = 'cancelado', updated_at = NOW()
+      UPDATE orders SET status = 'cancelado', lifecycle = 'cancelado', boleta_pendiente = 0, kitchen_status = 'cancelado', updated_at = NOW()
       WHERE id = $1
     `, [order.id]);
   }
@@ -455,24 +504,140 @@ export async function startFreshActiveOrder(phone) {
   return insertOrder(phone);
 }
 
-export async function saveOrder(order) {
-  const kitchen = order.kitchen_status || 'nuevo';
+export async function saveOrder(order, client = null) {
+  const work = async (c) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [order.phone]);
+    const prev = await c.query('SELECT lifecycle FROM orders WHERE id = $1 FOR UPDATE', [order.id]);
+    const incoming = order.lifecycle || lifecycleFromLegacy(order.status);
+    const lifecycle = mergeLifecycle(prev.rows[0]?.lifecycle, incoming);
+    const status = order.status === 'cancelado' ? 'cancelado' : legacyStatus(lifecycle);
+    order.lifecycle = lifecycle;
+    order.status = status;
+    await c.query(`
+      UPDATE orders SET
+        status = $1, lifecycle = $2, items = $3::jsonb, address = $4, total_usd = $5, total_bs = $6,
+        bcv_rate = $7, boleta_pendiente = $8, kitchen_status = $9,
+        payment_reference = COALESCE($10, payment_reference),
+        payment_media_id = COALESCE($11, payment_media_id),
+        payment_note = COALESCE($12, payment_note),
+        fulfillment = COALESCE($13, fulfillment),
+        location_lat = COALESCE($14, location_lat),
+        location_lng = COALESCE($15, location_lng),
+        location_label = COALESCE($16, location_label),
+        stock_deducted = COALESCE($17, stock_deducted),
+        updated_at = NOW()
+      WHERE id = $18
+    `, [
+      status,
+      lifecycle,
+      JSON.stringify(order.items || []),
+      order.address ?? null,
+      order.total_usd ?? null,
+      order.total_bs ?? null,
+      order.bcv_rate ?? null,
+      order.boleta_pendiente ? 1 : 0,
+      order.kitchen_status || 'nuevo',
+      order.payment_reference ?? null,
+      order.payment_media_id ?? null,
+      order.payment_note ?? null,
+      order.fulfillment ?? null,
+      order.location_lat ?? null,
+      order.location_lng ?? null,
+      order.location_label ?? null,
+      order.stock_deducted ?? null,
+      order.id,
+    ]);
+    if (prev.rows[0]?.lifecycle !== lifecycle) {
+      await c.query(`
+        INSERT INTO order_events (order_id, wa_id, from_state, to_state, actor, detail)
+        VALUES ($1, $2, $3, $4, 'barbara', $5::jsonb)
+      `, [order.id, order.phone, prev.rows[0]?.lifecycle || null, lifecycle, JSON.stringify({ tipo: 'estado' })]);
+    }
+  };
+  if (client) return work(client);
+  return withTransaction(work);
+}
+
+export async function listOpenOrders() {
+  return ordersWhere(`
+    WHERE lifecycle NOT IN ('cancelado', 'entregado')
+      AND items <> '[]'::jsonb
+    ORDER BY updated_at DESC
+  `, []);
+}
+
+export async function getCommercialOrder(phone) {
+  const rows = await ordersWhere(`
+    WHERE phone = $1 AND lifecycle NOT IN ('cancelado', 'entregado')
+    ORDER BY id DESC LIMIT 1
+  `, [phone]);
+  return rows[0] || null;
+}
+
+export async function listCustomerOrders(phone, limit = 8) {
+  return ordersWhere(`
+    WHERE phone = $1 AND lifecycle <> 'cancelado'
+    ORDER BY id DESC LIMIT $2
+  `, [phone, limit]);
+}
+
+export async function listOrderEvents(orderId) {
+  const { rows } = await query(`
+    SELECT id, from_state, to_state, actor, detail, ${ms('created_at')} AS created_at
+    FROM order_events WHERE order_id = $1 ORDER BY id
+  `, [orderId]);
+  return rows;
+}
+
+export async function ledgerActions(orderId) {
+  const { rows } = await query('SELECT action, lines FROM stock_ledger WHERE order_id = $1 ORDER BY id', [orderId]);
+  return rows.map((row) => ({ action: row.action, lines: row.lines }));
+}
+
+export function orderIsProtected(order) {
+  return isProtectedFromExpiry(order);
+}
+
+export async function setLogistics(phone, reason = null) {
+  const now = Date.now();
   await query(`
-    UPDATE orders SET
-      status = $1, items = $2::jsonb, address = $3, total_usd = $4, total_bs = $5,
-      bcv_rate = $6, boleta_pendiente = $7, kitchen_status = $8, updated_at = NOW()
-    WHERE id = $9
+    UPDATE conversations conv SET
+      status = 'LOGISTICA',
+      paused = TRUE,
+      paused_at = to_timestamp($2 / 1000.0),
+      paused_until = NULL,
+      handoff_reason = COALESCE($3, conv.handoff_reason),
+      updated_at = NOW()
+    FROM contacts c
+    WHERE conv.contact_id = c.id AND c.wa_id = $1 AND conv.status <> 'CLOSED'
+  `, [phone, now, reason]);
+}
+
+export async function getCustomerProfile(phone) {
+  const { rows } = await query('SELECT wa_id, display_name, fulfillment, notes, addresses FROM customer_profiles WHERE wa_id = $1', [phone]);
+  return rows[0] || null;
+}
+
+export async function saveCustomerProfile(phone, patch = {}) {
+  const current = await getCustomerProfile(phone);
+  const addresses = Array.isArray(patch.addresses) ? patch.addresses : (current?.addresses || []);
+  await query(`
+    INSERT INTO customer_profiles (wa_id, display_name, fulfillment, notes, addresses, updated_at)
+    VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+    ON CONFLICT (wa_id) DO UPDATE SET
+      display_name = COALESCE(EXCLUDED.display_name, customer_profiles.display_name),
+      fulfillment = COALESCE(EXCLUDED.fulfillment, customer_profiles.fulfillment),
+      notes = COALESCE(EXCLUDED.notes, customer_profiles.notes),
+      addresses = EXCLUDED.addresses,
+      updated_at = NOW()
   `, [
-    order.status,
-    JSON.stringify(order.items || []),
-    order.address ?? null,
-    order.total_usd ?? null,
-    order.total_bs ?? null,
-    order.bcv_rate ?? null,
-    order.boleta_pendiente ? 1 : 0,
-    kitchen,
-    order.id,
+    phone,
+    patch.display_name ?? current?.display_name ?? null,
+    patch.fulfillment ?? current?.fulfillment ?? null,
+    patch.notes ?? current?.notes ?? null,
+    JSON.stringify(addresses),
   ]);
+  return getCustomerProfile(phone);
 }
 
 export async function getOrderById(id) {

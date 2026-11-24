@@ -4,6 +4,7 @@
  */
 
 import { isGeneralCatalogAsk, isOnlyGreetingOrControl } from './customerText.js';
+import { isOperationalTurn } from './orderLifecycle.js';
 
 const HUMAN_RE = /hablar con (un |una )?(persona|asesor|humano|encargad)|asesor humano|persona real|quiero (un |una )?(asesor|persona|humano)|atenci[oó]n humana|comun[ií]queme con/i;
 const COMPLAINT_RE = /\b(queja|reclamo|reclamaci[oó]n|estafa|p[eé]sim[oa]|indignad[oa]|muy molest[oa]|no sirve|me enga[nñ]|timaron)\b/i;
@@ -52,15 +53,16 @@ export function decideEscalation(input = {}) {
   const complaint = COMPLAINT_RE.test(text);
   const wholesale = WHOLESALE_RE.test(text);
   const general = isGeneralCatalogAsk(text) || input.generalCatalog === true;
-  if ((isOnlyGreetingOrControl(text) || general) && !(human || complaint || wholesale)) {
+  const operational = isOperationalTurn(text) || input.operational === true;
+  if ((isOnlyGreetingOrControl(text) || general || operational) && !(human || complaint || wholesale)) {
     return { escalate: false, ignore: false, reason: null, confianza: confianzaNum };
   }
-  const outOfCatalog = !general && input.catalogType === 'none'
+  const outOfCatalog = !general && !operational && input.catalogType === 'none'
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
     && QUOTE_RE.test(text);
   const retrievalPct = input.retrievalScore == null ? null : Math.round(Number(input.retrievalScore) * 100);
-  const retrievalLow = !general && retrievalPct != null
+  const retrievalLow = !general && !operational && retrievalPct != null
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
     && retrievalPct <= threshold;
