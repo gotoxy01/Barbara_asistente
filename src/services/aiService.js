@@ -30,10 +30,10 @@ function nowInVenezuela() {
   }).format(new Date());
 }
 
-export function greetingForNow() {
-  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: config.timezone, hour: 'numeric', hourCycle: 'h23' }).format(new Date()));
+export function greetingForNow(date = new Date()) {
+  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: config.timezone, hour: 'numeric', hourCycle: 'h23' }).format(date));
   if (hour < 12) return '¡Buenos días!';
-  if (hour < 19) return '¡Buenas tardes!';
+  if (hour < 18) return '¡Buenas tardes!';
   return '¡Buenas noches!';
 }
 

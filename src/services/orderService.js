@@ -45,7 +45,11 @@ export function hasHouseNumber(address) {
 
 const round2 = (n) => Math.round(n * 100) / 100;
 
-export const isSoldByWeight = (p) => /kilo|\bkg\b/i.test(p?.presentacion || '');
+/** Solo kilos sueltos (charcutería, a granel). Un paquete de "1 kg" no va a la balanza. */
+export function isSoldByWeight(p) {
+  const presentation = String(p?.presentacion || '');
+  return /por\s+kilo|por\s+kg|a\s+granel|kg\s+suelto/i.test(presentation);
+}
 
 const plain = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
@@ -214,6 +218,42 @@ export function isShortFollowUp(customerText) {
     return true;
   }
   return text.length <= 10 && !/[a-záéíóúñ]{5,}/i.test(text);
+}
+
+function plainChoice(value) {
+  return String(value || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+}
+
+/**
+ * El cliente nombró ESE producto en este turno, no solo la familia ("una harina").
+ * Si hay varias harinas, hace falta la marca o la variante (Juana, blanca, P.A.N.).
+ */
+export function customerExplicitlyChose(product, customerText, siblings = []) {
+  const text = plainChoice(customerText);
+  const name = plainChoice(product?.nombre);
+  const brand = plainChoice(product?.marca);
+  if (!text || !name) return false;
+  if (text.includes(name)) return true;
+  const generic = new Set(['harina', 'maiz', 'arroz', 'pasta', 'aceite', 'azucar', 'queso', 'jamon', 'leche', 'refresco']);
+  const tokens = name.split(/[^a-z0-9ñ]+/).filter((word) => word.length >= 4 && !generic.has(word));
+  const brandHit = brand.length >= 3 && text.includes(brand);
+  const tokenHits = tokens.filter((word) => text.includes(word));
+  if (!brandHit && !tokenHits.length) return false;
+  const hits = brandHit ? [...tokenHits, brand] : tokenHits;
+  const ambiguous = (siblings || []).some((other) => {
+    if (!other || other.nombre === product.nombre) return false;
+    const otherName = plainChoice(`${other.nombre} ${other.marca || ''}`);
+    return hits.every((word) => otherName.includes(word));
+  });
+  return !ambiguous;
+}
+
+/** Balanza solo si es por kilo y el cliente eligió ese producto en este turno. */
+export function shouldOpenScaleTicket(customerText, product, siblings = []) {
+  if (!isSoldByWeight(product)) return false;
+  if (!customerExplicitlyChose(product, customerText, siblings)) return false;
+  if (mentionsWeight(customerText) && !/\b(unidad|unidades|pieza|trozo|pedazo|bandeja)\b/i.test(customerText)) return false;
+  return true;
 }
 
 /** ¿El texto del cliente parece referirse a este producto? */
@@ -614,12 +654,16 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
 
       const p = found.product;
       const live = await db.getProductBySku(p.sku);
-      if (live) {
-        p.precio = Number(live.price);
-        p.stock = live.stock;
-      }
-      if (p.stock == null) {
-        return handlers.verificar_stock({ producto: p.nombre, cantidad: qty });
+      if (live && live.price != null) p.precio = Number(live.price);
+      if (live && live.stock != null) p.stock = live.stock;
+      const lookedUp = await searchProducts(customerText || producto, {});
+      const siblings = lookedUp.products?.length ? lookedUp.products : [p];
+      if (!customerExplicitlyChose(p, customerText || producto, siblings)) {
+        return {
+          error: 'El cliente todavía no eligió un producto concreto.',
+          opciones: optionsList(siblings.slice(0, 5)),
+          instruccion: 'Liste estas opciones con su precio y pregunte cuál desea y cuántos. No agregue nada ni abra pesaje.',
+        };
       }
       if (p.stock === 0) {
         return handlers.verificar_stock({ producto: p.nombre, cantidad: qty });
@@ -638,7 +682,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (isSoldByWeight(p) && moneyUsd > 0 && p.precio > 0) {
         addQty = round2(moneyUsd / p.precio);
         if (!(addQty > 0)) return { error: 'No se pudo calcular el peso a partir del monto.' };
-      } else if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
+      } else if (shouldOpenScaleTicket(customerText, p, siblings) && !weightMentionedFor(p.nombre, customerText)) {
         // "un aguacate", "3 plátanos": unidades → balanza.
         const result = await handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
         return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos ni monto): se envió a pesar en caja.` };
@@ -706,6 +750,23 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async solicitar_pesaje({ producto, cantidad }) {
       const nombre = String(producto ?? '').trim();
       if (!nombre) return { error: 'Indique el producto a pesar.' };
+      const catalogHit = findProduct(nombre);
+      if (catalogHit.product && !isSoldByWeight(catalogHit.product)) {
+        return {
+          error: `"${catalogHit.product.nombre}" es un paquete de peso fijo (${catalogHit.product.presentacion}), no se pesa.`,
+          instruccion: 'No abra balanza. Si el cliente ya eligió ese paquete, use agregar_producto. Si hay varias opciones, lístelas y pregunte cuál.',
+        };
+      }
+      if (catalogHit.product) {
+        const lookedUp = await searchProducts(customerText || nombre, {});
+        const siblings = lookedUp.products?.length ? lookedUp.products : [catalogHit.product];
+        if (!shouldOpenScaleTicket(customerText, catalogHit.product, siblings)) {
+          return {
+            error: 'El cliente no pidió pesar ese producto en este turno.',
+            instruccion: 'No abra balanza ni anote el producto. Pregunte cuál desea y cuántos.',
+          };
+        }
+      }
       // Nunca anotar el mensaje completo como "producto".
       if (nombre.length > 60 || /\n/.test(nombre) || /^(hola|buenas|quiero|dame|necesito)\b/i.test(nombre)) {
         const found = findProduct(nombre);
@@ -908,7 +969,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (added.length) parts.push(`Anoté: ${added.map((call) => call.result.agregado).join(', ')}. ¿Desea agregar algo más?`);
       return parts.join('\n\n');
     }
-    const prices = calls.filter((call) => call.name === 'get_price' && call.result?.ok);
+      const prices = calls.filter((call) => call.name === 'get_price' && call.result?.ok);
     const onlyLookup = calls.every((call) => ['get_price', 'get_stock', 'search_catalog'].includes(call.name));
     if (prices.length && onlyLookup && !calls.some((call) => call.result?.general)) {
       const lines = prices.map((call) => {
@@ -918,7 +979,10 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
           : `$ ${Number(row.precio_usd).toFixed(2)} USD`;
         return `*${row.nombre}*${row.presentacion ? ` (${row.presentacion})` : ''}: ${money}`;
       });
-      return `${lines.join('\n')}\n\n¿Cuántos desea?`;
+      const ask = prices.length > 1
+        ? '¿Cuál de estas desea y cuántas?'
+        : '¿Cuántos desea?';
+      return `${lines.join('\n')}\n\n${ask}`;
     }
     const terminal = new Set(['generar_boleta', 'registrar_direccion']);
     if (!calls.every((call) => terminal.has(call.name) && call.result?.ok)) return null;

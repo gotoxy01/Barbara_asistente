@@ -19,6 +19,7 @@ import {
   createOrderTools,
   HOUSE_NUMBER_REMINDER,
   isSoldByWeight,
+  shouldOpenScaleTicket,
   moneyAmountMentioned,
   MORE_ITEMS_QUESTION,
   mentionsWeight,
@@ -191,14 +192,12 @@ async function ensureHandOff(aiText, customerText, tools) {
   if (!text) return;
 
   const found = await searchProducts(text, {});
-  const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
-  if (!weighables.length) return;
+  const products = found.products || [];
+  const weighables = products.filter((p) => shouldOpenScaleTicket(text, p, products));
+  if (weighables.length !== 1) return;
 
-  const needsScale = weighables.filter((p) => !weightMentionedFor(p.nombre, text));
-  const targets = needsScale.length ? needsScale : weighables;
-  const primary = targets.find((p) => /^(tomate|pl[aá]tano|cebolla|aguacate|lim[oó]n|papa|yuca|piment[oó]n|ajo|cilantro|lechuga)$/i.test(p.nombre))
-    || targets[0];
-  if (!primary?.nombre) return;
+  const primary = weighables[0];
+  if (!primary?.nombre || !isSoldByWeight(primary)) return;
 
   if (WEIGH_CLAIM_RE.test(aiText)) {
     // Solo el nombre de catálogo — nunca la frase completa del cliente.
@@ -556,7 +555,10 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       isNewConversation,
       resume,
     });
-    if (audited) reply = audited;
+    const currentOrder = await db.getActiveOrder(phone);
+    if (audited && auditorInventedScale(reply, audited, currentOrder?.items || [])) {
+      verbose(`[${phone}] Auditor descartado: inventó un pesaje que no está en el pedido.`);
+    } else if (audited) reply = audited;
     lap('auditor', mark);
   } else if (!lightTurn) {
     timings.push({ step: 'auditor', ms: 0, skipped: true });
@@ -577,6 +579,13 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     timings: closeTimings(),
     summary: summarizeTurns(scopedHistory),
   };
+}
+
+/** El auditor no puede inventar un pesaje si el pedido no tiene ese pendiente. */
+export function auditorInventedScale(draft, corrected, items = []) {
+  const scale = /pes(ar|ando|aje)|balanza|momentico/i;
+  const pendingScale = (items || []).some((item) => item && item.precio == null && (item.pesable || item.verificacion));
+  return scale.test(String(corrected || '')) && !pendingScale && !scale.test(String(draft || ''));
 }
 
 /** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
