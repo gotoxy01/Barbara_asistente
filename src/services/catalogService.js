@@ -315,13 +315,15 @@ export function makeSku(parts) {
     .slice(0, 64);
 }
 
-function buildProduct({ nombre, presentacion, precio, categoria, marca = '', sku = '', stock = null }) {
+function buildProduct({ nombre, presentacion, precio, categoria, marca = '', sku = '', stock = null, destacado = false }) {
   const label = presentacion || 'unidad';
   return {
     nombre,
     presentacion: label,
     precio: Number(precio),
     categoria,
+    marca,
+    destacado: Boolean(destacado),
     stock: stock == null || stock === '' ? null : Number(stock),
     sku: sku || makeSku([categoria, nombre, label]),
     nameTokens: nameTokens(`${nombre} ${marca}`),

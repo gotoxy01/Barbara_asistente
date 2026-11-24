@@ -8,7 +8,14 @@ import {
   parseLocation,
   parsePaymentReport,
 } from './orderLifecycle.js';
-import { createOrderTools, pendingWeighItems } from './orderService.js';
+import { isAddIntent, isOrderStatusQuestion } from './customerText.js';
+import { searchProducts } from './catalogService.js';
+import {
+  createOrderTools,
+  expandCustomerReply,
+  pendingWeighItems,
+  planPurchase,
+} from './orderService.js';
 
 /**
  * Dirección, pago, ubicación y “es todo” se resuelven en código.
@@ -18,9 +25,43 @@ export async function tryOperationalTurn({ phone, name, text, bcv, notify }) {
   const raw = String(text || '').trim();
   const location = parseLocation(raw);
   const payment = parsePaymentReport(raw);
-  if (!isOperationalTurn(raw) && !location && !payment) return null;
-
   const tools = createOrderTools({ phone, name, bcv, notify, customerText: raw });
+
+  if (isOrderStatusQuestion(raw)) {
+    const order = await db.getActiveOrder(phone);
+    if (!order?.items?.length) return reply('Todavía no tiene productos anotados en el pedido.');
+    const lines = order.items.map((item) => `• ${item.cantidad} x ${item.nombre}${item.presentacion ? ` (${item.presentacion})` : ''}`);
+    const where = order.address ? `\n\nDirección anotada: ${order.address}` : '';
+    return reply(`En su pedido va:\n${lines.join('\n')}${where}`);
+  }
+
+  if (/^(tienen|hay|tiene)\b/i.test(raw) && !isAddIntent(raw)) {
+    const found = await searchProducts(raw, {});
+    const products = (found.products || []).slice(0, 5);
+    if (!products.length) return null;
+    const lines = products.map((product) => `• *${product.nombre}* (${product.presentacion}): $ ${Number(product.precio).toFixed(2)} USD`);
+    return reply(`Tenemos estas opciones:\n${lines.join('\n')}\n\n¿Cuál desea y cuántas?`);
+  }
+
+  if (isAddIntent(raw)) {
+    const plan = await planPurchase(raw);
+    if (plan.action === 'choose') {
+      const lines = plan.products.map((product) => `• *${product.nombre}* (${product.presentacion}): $ ${Number(product.precio).toFixed(2)} USD`);
+      return reply(`Hay varias parecidas:\n${lines.join('\n')}\n\n¿Cuál desea y cuántas?`);
+    }
+    if (plan.action === 'add') {
+      const result = await tools.execute('agregar_producto', { producto: plan.product.nombre, cantidad: plan.qty });
+      if (result?.ok) {
+        const textOut = expandCustomerReply(
+          tools.finalize([{ name: 'agregar_producto', args: {}, result }]) || `Anoté: ${result.agregado}.`,
+          tools.state,
+        );
+        return { reply: textOut, toolCalls: [{ name: 'agregar_producto', args: { producto: plan.product.nombre, cantidad: plan.qty }, result }], escalated: false };
+      }
+    }
+  }
+
+  if (!isOperationalTurn(raw) && !location && !payment) return null;
 
   if (location) {
     const order = await db.getCommercialOrder(phone);
@@ -57,13 +98,13 @@ export async function tryOperationalTurn({ phone, name, text, bcv, notify }) {
     if (pendingWeighItems(order.items).length) return null;
     const result = await tools.execute('generar_boleta', {});
     if (!result?.ok) return null;
-    const textOut = tools.finalize([{ name: 'generar_boleta', args: {}, result }]);
+    const textOut = expandCustomerReply(tools.finalize([{ name: 'generar_boleta', args: {}, result }]) || '', tools.state);
     return { reply: textOut, toolCalls: [{ name: 'generar_boleta', args: {}, result }], escalated: false };
   }
 
   if (isOperationalTurn(raw)) {
     const order = await db.getCommercialOrder(phone);
-    if (order && ['boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(order.lifecycle)) {
+    if (order?.items?.length && ['borrador', 'boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(order.lifecycle || 'borrador')) {
       const result = await tools.execute('registrar_direccion', { direccion: raw });
       if (result?.ok) {
         const textOut = tools.finalize([{ name: 'registrar_direccion', args: { direccion: raw }, result }]);
@@ -71,11 +112,6 @@ export async function tryOperationalTurn({ phone, name, text, bcv, notify }) {
       }
       if (result?.error && /n[uú]mero de casa|apto/i.test(result.error)) {
         return reply('Para la entrega necesito el número de casa o del apartamento. También puede enviar su ubicación de WhatsApp o escribir “retiro en tienda”.');
-      }
-    }
-    if (!order || order.lifecycle === 'borrador') {
-      if (isPickupText(raw) || /\b(torre|calle|avenida|edificio|direcci[oó]n)\b/i.test(raw)) {
-        return reply('Anotaré esa dirección cuando cerremos el pedido. ¿Esos son todos los productos, o desea agregar algo más?');
       }
     }
   }

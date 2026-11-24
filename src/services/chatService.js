@@ -15,6 +15,7 @@ import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from '
 import {
   ADDRESS_QUESTION,
   BOLETA_MARKER,
+  expandCustomerReply,
   CANCEL_MARKER,
   createOrderTools,
   HOUSE_NUMBER_REMINDER,
@@ -39,7 +40,7 @@ const THREAD_FOLLOW_MSGS = 4;
 const WAITING_WEIGHT_REPLY =
   '¡Claro! Déjeme pesarlo aquí en un momentico para darle el monto exacto y ya le aviso. ⚖️';
 
-const INTRO = 'Le saluda *Bárbara*, asistente virtual de *Abasto Los Cuchos*. 🙏';
+const INTRO = 'Le saluda *Bárbara*, asistente virtual de *Abasto Los Cuchos*.';
 
 const FALLBACK_REPLY =
   'Disculpe, en este momento presentamos un inconveniente técnico. 🙏\n\nUno de nuestros asesores de *Abasto Los Cuchos* le atenderá en breve.';
@@ -231,13 +232,23 @@ function isGreeting(text) {
   return clean.length <= 60 && GREETING_RE.test(clean);
 }
 
+function greetingName(name) {
+  const full = String(name || '').trim();
+  if (!full || /^cliente\b/i.test(full)) return '';
+  const first = full.split(/\s+/)[0];
+  if (/^(cliente|prueba|test|usuario)$/i.test(first)) return '';
+  return first;
+}
+
 function greetingReply(text, isNewConversation, name) {
   const group = text.match(/^\[Mensaje escrito en el grupo «?"?([^»"\];]+)/)?.[1];
   const viaGroup = group ? ` Le escribo por privado por su mensaje en el grupo *${group.trim()}*.` : '';
-  const who = name ? `, ${String(name).split(' ')[0]}` : '';
+  const who = greetingName(name);
+  const hello = greetingForNow();
+  const lead = who ? `${hello.replace(/!$/, '')}, ${who}!` : hello;
   return isNewConversation || group
-    ? `${greetingForNow()}${who} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
-    : `¡Hola${who}! ¿En qué le puedo ayudar? 😊`;
+    ? `${lead} ${INTRO}${viaGroup}\n\n¿En qué le puedo ayudar hoy? 😊`
+    : `¡Hola${who ? `, ${who}` : ''}! ¿En qué le puedo ayudar? 😊`;
 }
 
 /**
@@ -774,16 +785,9 @@ function stripPrematurePaymentPitch(text, state = {}) {
  * - tras agregar/quitar productos siempre se pregunta si desea algo más.
  */
 function applyOrderFlow(text, state) {
-  let reply = text;
+  let reply = expandCustomerReply(text, state);
 
-  if (state.boleta) {
-    const boleta = state.boletaForCustomer();
-    reply = reply.includes(BOLETA_MARKER)
-      ? reply.replace(BOLETA_MARKER, boleta)
-      : `${boleta}\n\n${ADDRESS_QUESTION}`;
-    if (!reply.includes(ADDRESS_QUESTION)) reply = `${reply}\n\n${ADDRESS_QUESTION}`;
-    return reply;
-  }
+  if (state.boleta) return reply;
 
   reply = reply.split(BOLETA_MARKER).join('').trim()
     .replace(/¿[^¿?]*(?:sería|seria) todo(?: por hoy)?\?\s*(?:🛒)?/gi, MORE_ITEMS_QUESTION);
@@ -806,10 +810,10 @@ function applyOrderFlow(text, state) {
     return reply;
   }
 
-  if (state.cartChanged && !state.addressSaved && !reply.includes(MORE_ITEMS_QUESTION)) {
+  if (state.cartChanged && !state.addressSaved && !/desea agregar algo m[aá]s/i.test(reply)) {
     reply = `${reply}\n\n${MORE_ITEMS_QUESTION}`;
   }
-  return reply;
+  return expandCustomerReply(reply, state);
 }
 
 /**

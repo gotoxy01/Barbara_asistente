@@ -5,7 +5,7 @@ import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
 import { catalogCustomerReply, catalogOverviewText, findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
 import { buildPriceResult, buildStockResult } from './priceTools.js';
-import { STOCK_CHECK_REPLY, isGenericCatalogQuery } from './customerText.js';
+import { STOCK_CHECK_REPLY, isAddIntent, isGenericCatalogQuery, isOrderStatusQuestion } from './customerText.js';
 import { closeTicketsForPhone } from './ticketStore.js';
 import { applyAction } from './orderBook.js';
 import { customerLogisticsReply } from './orderLifecycle.js';
@@ -120,6 +120,61 @@ export function computeTotals(items, bcv, { pickup = false } = {}) {
   // El total en Bs es la suma de las líneas, para que la boleta cuadre al sumarla a mano.
   const totalBs = rate ? round2(all.reduce((s, l) => s + (l.bs || 0), 0)) : null;
   return { lines, fees, pending, totalUsd, totalBs, rate, pickup: !!pickup };
+}
+
+function askedQuantity(text) {
+  const raw = String(text || '').toLowerCase();
+  if (/\b(una|un|1)\b/.test(raw)) return 1;
+  const digit = raw.match(/\b(\d+)\b/);
+  return digit ? Number(digit[1]) : 0;
+}
+
+/** Decide si este mensaje agrega un solo producto, pide opciones o no toca el carrito. */
+export async function planPurchase(text) {
+  if (isOrderStatusQuestion(text) || !isAddIntent(text)) return { action: 'none' };
+  const found = await searchProducts(text, {});
+  const products = found.products || [];
+  const chosen = products.filter((product) => customerExplicitlyChose(product, text, products));
+  if (chosen.length === 1) return { action: 'add', product: chosen[0], qty: askedQuantity(text) || 1 };
+  const brand = products.filter((product) => {
+    const mark = String(product.marca || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/\./g, '');
+    const spoken = String(text || '').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '');
+    return mark.length >= 3 && spoken.includes(mark);
+  });
+  const qty = askedQuantity(text);
+  if (brand.length > 1 && qty === 1) {
+    const pick = brand.find((product) => product.destacado) || brand[0];
+    return { action: 'add', product: pick, qty: 1 };
+  }
+  if (products.length > 1) return { action: 'choose', products: products.slice(0, 5) };
+  if (products.length === 1 && customerExplicitlyChose(products[0], text, products)) {
+    return { action: 'add', product: products[0], qty: qty || 1 };
+  }
+  return { action: 'none' };
+}
+
+/** Sustituye [BOLETA] por el resumen real y no repite la pregunta de “algo más”. */
+export function expandCustomerReply(text, state = {}) {
+  let reply = String(text || '');
+  if (state.boleta) {
+    const boleta = state.boletaForCustomer ? state.boletaForCustomer() : state.boleta;
+    reply = reply.includes(BOLETA_MARKER) ? reply.replaceAll(BOLETA_MARKER, boleta) : `${boleta}\n\n${reply}`;
+    if (state.savedAddress) {
+      reply = reply.split(ADDRESS_QUESTION).join('').trim();
+      if (!reply.includes(state.savedAddress)) reply += `\n\n📍 *Dirección de entrega:* ${state.savedAddress}`;
+    } else if (!reply.includes(ADDRESS_QUESTION)) {
+      reply = `${reply.trim()}\n\n${ADDRESS_QUESTION}`;
+    }
+  }
+  let seenMore = false;
+  reply = reply.split('\n').filter((line) => {
+    if (/desea agregar algo m[aá]s/i.test(line)) {
+      if (seenMore) return false;
+      seenMore = true;
+    }
+    return true;
+  }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return reply;
 }
 
 export function renderBoleta(items, bcv, { pickup = false } = {}) {
@@ -638,6 +693,12 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async agregar_producto({ producto, cantidad }) {
       const qty = Number(cantidad);
       if (!(qty > 0)) return { error: 'La cantidad debe ser mayor que cero.' };
+      if (customerText && !isAddIntent(customerText)) {
+        return {
+          error: 'El cliente no pidió agregar un producto en este mensaje.',
+          instruccion: 'Si pregunta por su pedido, muéstrelo. No agregue ni duplique productos.',
+        };
+      }
       const found = findProduct(String(producto ?? ''));
       if (found.options) {
         return {
@@ -658,7 +719,9 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (live && live.stock != null) p.stock = live.stock;
       const lookedUp = await searchProducts(customerText || producto, {});
       const siblings = lookedUp.products?.length ? lookedUp.products : [p];
-      if (!customerExplicitlyChose(p, customerText || producto, siblings)) {
+      const planned = customerText ? await planPurchase(customerText) : { action: 'none' };
+      const plannedThis = planned.action === 'add' && planned.product?.nombre === p.nombre;
+      if (!plannedThis && !customerExplicitlyChose(p, customerText || producto, siblings)) {
         return {
           error: 'El cliente todavía no eligió un producto concreto.',
           opciones: optionsList(siblings.slice(0, 5)),
@@ -895,7 +958,8 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       const t = computeTotals(order.items, bcv);
       Object.assign(order, { status: 'boleta', lifecycle: 'boleta_enviada', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
       await db.saveOrder(order);
-      state.boleta = renderBoleta(order.items, bcv);
+      state.boleta = renderBoleta(order.items, bcv, { pickup: order.fulfillment === 'pickup' || isPickupAddress(order.address) });
+      state.savedAddress = order.address || null;
       return {
         ok: true,
         instruccion: `Escribe exactamente ${BOLETA_MARKER} en tu respuesta (el sistema lo reemplaza por la boleta). Deja claro que el pedido AÚN NO ESTÁ CERRADO hasta que indiquen dirección de delivery (con número de casa) o “retiro en tienda”. No escribas tú los montos ni el total.`,
@@ -905,8 +969,9 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     async registrar_direccion({ direccion }) {
       const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
-      if (order.status !== 'boleta' && order.lifecycle !== 'boleta_enviada' && order.lifecycle !== 'pago_reportado') {
-        return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
+      if (!['borrador', 'boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(order.lifecycle || 'borrador')
+        && order.status !== 'abierto' && order.status !== 'boleta') {
+        return { error: 'Ese pedido ya no admite dirección.' };
       }
       const raw = String(direccion ?? '').trim();
       const pickup = isPickupAddress(raw);
@@ -966,7 +1031,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     if (onlyCart && (checks.length || added.length)) {
       const parts = [];
       if (checks.length) parts.push(STOCK_CHECK_REPLY);
-      if (added.length) parts.push(`Anoté: ${added.map((call) => call.result.agregado).join(', ')}. ¿Desea agregar algo más?`);
+      if (added.length) parts.push(`Anoté: ${added.map((call) => call.result.agregado).join(', ')}.\n${MORE_ITEMS_QUESTION}`);
       return parts.join('\n\n');
     }
       const prices = calls.filter((call) => call.name === 'get_price' && call.result?.ok);

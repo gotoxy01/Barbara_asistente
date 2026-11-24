@@ -303,6 +303,7 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
   const contents = history.map((m) => ({ role: m.role, parts: [{ text: m.content }] }));
   const toolCalls = [];
   const turn = { model: config.gemini.model };
+  let jsonRetries = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = await withRetries((model) => callGemini(model, systemPrompt, contents, tools), turn);
@@ -310,13 +311,14 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
 
     if (!calls.length || !tools) {
       const raw = (response.text || '').trim();
-      if (!raw) {
-        const reason = response.candidates?.[0]?.finishReason ?? 'desconocida';
-        throw new GeminiError(`Gemini devolvió una respuesta vacía (finishReason: ${reason})`, {
-          kind: 'empty', retryable: false, hint: 'Gemini devolvió una respuesta vacía.' });
-      }
-      const parsed = parseSalesJson(raw);
+      const parsed = raw ? parseSalesJson(raw) : null;
       if (!parsed) {
+        if (jsonRetries < 1) {
+          jsonRetries += 1;
+          turn.model = config.gemini.fallbackModel || turn.model;
+          verbose('Gemini no devolvió el JSON de ventas; se reintenta una vez.');
+          continue;
+        }
         throw new GeminiError('Gemini no devolvió el JSON de ventas', {
           kind: 'empty', retryable: false, hint: 'La respuesta no trae el JSON con respuesta_cliente y confianza_porcentaje.',
         });

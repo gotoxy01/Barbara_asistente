@@ -36,7 +36,7 @@ const FILLER = new Set(`
   ese eso son estan muy mas pero
 `.split(/\s+/).filter(Boolean));
 
-const GENERAL_ASK = /\b(que tienes|que tienen|que venden|que vende|que hay|que ofrecen|que manejan|que productos|productos tienen|productos venden|productos hay|catalogo|categorias|ofertas|promociones)\b/;
+const GENERAL_ASK = /\b(que tienes|que tienen|que venden|que vende|que hay|que ofrecen|que manejan|que productos|que mas|mas tienen|productos tienen|productos venden|productos hay|catalogo|categorias|ofertas|promociones)\b/;
 
 export const STOCK_CHECK_REPLY = 'En este momento estoy verificando si lo tenemos en stock, deme un momento.';
 
@@ -60,6 +60,22 @@ export function isGeneralCatalogAsk(text) {
     return true;
   });
   return leftovers.length === 0;
+}
+
+/** "¿Y mi harina?" pregunta por el pedido. No es un pedido nuevo. */
+export function isOrderStatusQuestion(text) {
+  const normalized = plain(text);
+  if (!normalized) return false;
+  return /\b(y mi|y el pedido|y mi pedido|que llevo|como va|status del pedido)\b/.test(normalized)
+    || /^(y )?(mi |el |la )?(pedido|harina|compra)\b/.test(normalized);
+}
+
+/** Quiere agregar algo ahora. Una pregunta por el pedido, o un "¿tienen?", no cuenta. */
+export function isAddIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw || isOrderStatusQuestion(raw) || isGeneralCatalogAsk(raw)) return false;
+  if (/\?\s*$/.test(raw) && !/\b(quiero|dame|deme|anota|agrega|ponme|mandame|m[aá]ndame)\b/i.test(raw)) return false;
+  return /\b(quiero|dame|deme|anota|agrega|agregue|ponme|m[aá]ndame|mandame|necesito)\b/i.test(raw);
 }
 
 /** "catalogo general" no es un producto: no se manda a search_catalog. */

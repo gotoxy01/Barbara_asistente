@@ -107,7 +107,7 @@ export function shouldEnterLogistics(order) {
 const ADDRESS_RE = /\b(torre|calle|carrera|avenida|av\.|urbanizacion|urbanización|urb\.|edificio|edif\.?|piso|apto|apartamento|casa|sector|quinta|manzana|direccion|dirección|entrega|las mercedes|referencia)\b/i;
 const PRODUCT_RE = /\b(harina|queso|jamon|jamón|aceite|arroz|pasta|precio|cuesta|kilo|kg)\b/i;
 const PAYMENT_RE = /referencia|comprobante|pago\s*m[oó]vil|pagu[eé]|ya\s+pagu|transferenc|baucher|voucher|captura/i;
-const CHECKOUT_RE = /^(es todo|nada mas|nada más|listo|confirmar|confirmo|eso es todo|solo eso|sólo eso)\b/i;
+const CHECKOUT_RE = /^(es todo|nada mas|nada más|mas nada|más nada|listo|confirmar|confirmo|eso es todo|solo eso|sólo eso|ya esta|ya está|no mas|no más)\b/i;
 const LOCATION_RE = /^\/ubicacion\b|comparti[oó] su ubicaci[oó]n|\blat\s*-?\d+(?:\.\d+)?\s*,\s*lon\s*-?\d/i;
 
 /** Dirección, pago o cierre: no es una búsqueda de catálogo. */
@@ -235,8 +235,9 @@ export function reduceOrder(order, action) {
   }
 
   if (type === 'save_address') {
-    if (!['boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(current.lifecycle)) {
-      return { error: 'Primero hay que cerrar la boleta.' };
+    if (!current.items?.length) return { error: 'No hay productos para asociar la dirección.' };
+    if (!['borrador', 'boleta_enviada', 'pago_reportado', 'pago_verificado'].includes(current.lifecycle)) {
+      return { error: 'Ese pedido ya no admite dirección.' };
     }
     const raw = String(action.address || '').trim();
     const pickup = isPickupText(raw);
