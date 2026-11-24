@@ -103,7 +103,7 @@ nssm install Barbara "C:\Program Files\nodejs\node.exe"
 
 En la ventana de NSSM:
 
-- Argumentos: `src\server.js`
+- Argumentos: `--use-system-ca src\server.js`
 - Directorio: la carpeta de Bárbara
 - Inicio: automático
 
@@ -111,7 +111,7 @@ O, si prefiere pm2:
 
 ```powershell
 npm install -g pm2
-pm2 start src/server.js --name barbara
+pm2 start src/server.js --name barbara --node-args="--use-system-ca"
 pm2 save
 pm2-startup install
 ```

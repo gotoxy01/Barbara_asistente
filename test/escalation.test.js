@@ -60,6 +60,17 @@ describe('umbral de confianza y escalado', () => {
     assert.match(decision.reason, /búsqueda/);
   });
 
+  it('un saludo no se escala aunque la búsqueda anterior haya sido floja', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 90,
+      retrievalScore: 0.1,
+      catalogTerms: ['reanudar'],
+      customerText: 'Hola',
+    });
+    assert.equal(decision.escalate, false);
+  });
+
   it('no pisa una boleta ya calculada por el sistema', () => {
     const decision = decideEscalation({ ...base, confianza: 10, cartCommitted: true, customerText: 'es todo' });
     assert.equal(decision.escalate, false);

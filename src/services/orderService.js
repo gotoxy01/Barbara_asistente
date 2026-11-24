@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { publishCrm } from '../crm/events.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
-import { findProduct, getDeliveryCost, isBotellon, productLabel } from './catalogService.js';
+import { findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
 import { buildPriceResult, buildStockResult } from './priceTools.js';
 import { closeTicketsForPhone } from './ticketStore.js';
 
@@ -370,6 +370,17 @@ export async function applyWeighedPrice(phone, usd, bcv, { ticketItems = null } 
 
 export const ORDER_TOOL_DECLARATIONS = [
   {
+    name: 'search_catalog',
+    description: 'Busca en el inventario las palabras del cliente y devuelve solo sku reales. Úsela antes de get_price si no tiene el sku. Nunca invente un código.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        consulta: { type: Type.STRING, description: 'Lo que pidió el cliente, por ejemplo "harina pan"' },
+      },
+      required: ['consulta'],
+    },
+  },
+  {
     name: 'get_price',
     description: 'Precio vigente en USD y bolívares de un sku. Úsela SIEMPRE antes de decir un precio. El catálogo del prompt no trae montos.',
     parameters: {
@@ -496,6 +507,22 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
   };
 
   const handlers = {
+    async search_catalog({ consulta }) {
+      const found = await searchProducts(String(consulta || customerText || ''), {});
+      const productos = (found.products || []).slice(0, 5).map((product) => ({
+        sku: product.sku,
+        nombre: `${product.nombre} (${product.presentacion})`,
+        precio_usd: Number(product.precio).toFixed(2),
+      }));
+      if (!productos.length) {
+        return {
+          ok: false,
+          productos: [],
+          instruccion: 'No hay un sku para inventar. Diga que va a verificar en el inventario. No diga que no hay.',
+        };
+      }
+      return { ok: true, productos, instruccion: 'Use solo estos sku y estos precios. No invente otro código.' };
+    },
     async get_price({ sku }) {
       const row = await db.getProductBySku(String(sku || '').trim());
       return buildPriceResult(row, bcv?.rate);

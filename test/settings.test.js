@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   explainPgError,
+  fillDatabaseSecrets,
   isBlank,
   missingSettings,
   parsePostgresUrl,
@@ -36,5 +37,18 @@ describe('archivo .env', () => {
     assert.match(explainPgError({ code: '28P01', message: 'password authentication failed' }), /contraseña/i);
     assert.match(explainPgError({ message: 'could not open extension control file "vector"' }), /pgvector/i);
     assert.equal(quoteLiteral("o'hara"), "'o''hara'");
+  });
+
+  it('guarda la clave de Postgres codificada en la dirección', () => {
+    const text = fillDatabaseSecrets('POSTGRES_ADMIN_URL=\nDATABASE_URL=\nCRM_TOKEN=\n', {
+      adminPassword: 'clave del admin',
+      dbPassword: 'a/b c@d',
+      crmToken: 'frase-del-panel',
+    });
+    assert.match(text, /CRM_TOKEN=frase-del-panel/);
+    assert.match(text, /DATABASE_URL=postgresql:\/\/barbara:/);
+    const saved = text.match(/^DATABASE_URL=(.*)$/m)[1];
+    assert.equal(parsePostgresUrl(saved).password, 'a/b c@d');
+    assert.equal(parsePostgresUrl(saved).database, 'barbara');
   });
 });

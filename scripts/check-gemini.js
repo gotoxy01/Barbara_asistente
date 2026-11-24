@@ -1,36 +1,31 @@
-// Verifica en segundos que la clave, el modelo y la facturación de Gemini funcionan.
+// Verifica que la clave genere texto de verdad. Listar modelos no alcanza:
+// un modelo puede aparecer en la lista y fallar al usarlo (404 o 503).
 // Uso: npm run check
-import { GoogleGenAI } from '@google/genai';
 import { assertGeminiConfig, config } from '../src/config.js';
 import { generateBarbaraReply } from '../src/services/aiService.js';
 
 assertGeminiConfig();
 
 const key = config.gemini.apiKey;
-console.log(`Modelo:  ${config.gemini.model}`);
-console.log(`Clave:   ${key.slice(0, 4)}… (${key.length} caracteres)`);
-
-const ai = new GoogleGenAI({ apiKey: key });
-
-try {
-  const available = [];
-  for await (const m of await ai.models.list({ config: { pageSize: 200 } })) available.push(m.name.replace('models/', ''));
-  const found = available.includes(config.gemini.model);
-  console.log(`\n1) Clave válida para la Gemini API: ✅`);
-  console.log(`2) Modelo "${config.gemini.model}" disponible: ${found ? '✅' : '❌'}`);
-  if (!found) console.log(`   Modelos flash disponibles: ${available.filter((n) => /flash/.test(n) && !/tts|image|audio|live/.test(n)).join(', ')}`);
-} catch (err) {
-  console.log(`\n1) Clave válida para la Gemini API: ❌\n   ${err.message.slice(0, 300)}`);
-  process.exit(1);
-}
+console.log(`Modelo principal: ${config.gemini.model}`);
+console.log(`Respaldo:         ${config.gemini.fallbackModel || '(ninguno)'}`);
+console.log(`Clave:            ${key.slice(0, 4)}… (${key.length} caracteres)`);
+console.log('\nLlamando a generateContent (si el principal falla, se prueba el respaldo)...');
 
 try {
-  const { text } = await generateBarbaraReply(
+  const result = await generateBarbaraReply(
     'Responde solo el JSON de ventas. respuesta_cliente debe ser exactamente OK. confianza_porcentaje 100. requiere_especialista false. producto_identificado null. sku null. motivo_escalado null.',
     [{ role: 'user', content: 'hola' }],
   );
-  console.log(`3) Generación de respuesta: ✅ ("${text}")\n\nTodo listo: Bárbara puede responder.`);
+  const used = result.model || config.gemini.model;
+  console.log(`\nGeneración: OK con "${used}" ("${result.text}")`);
+  if (used !== config.gemini.model) {
+    console.log(`El principal "${config.gemini.model}" no respondió. El que funcionó fue "${used}".`);
+    console.log('Puede dejar GEMINI_MODEL con ese nombre en .env.');
+  }
+  console.log('\nTodo listo: Bárbara puede responder.');
 } catch (err) {
-  console.log(`3) Generación de respuesta: ❌ [${err.kind ?? '?'} ${err.status ?? ''}]\n   ${err.hint ?? err.message}`);
+  console.log(`\nGeneración: FALLÓ [${err.kind ?? '?'} ${err.status ?? ''}]`);
+  console.log(err.hint ?? err.message);
   process.exit(1);
 }

@@ -6,7 +6,12 @@ import { toBolivares } from './bcvService.js';
  */
 export function buildPriceResult(product, rate = null) {
   if (!product || product.category === 'politica') {
-    return { ok: false, error: 'Ese código no es un producto con precio.' };
+    return {
+      ok: false,
+      sku_desconocido: !product,
+      error: product ? 'Ese código no es un producto con precio.' : 'Ese sku no está en el catálogo.',
+      instruccion: 'No invente un sku. Llame search_catalog con las palabras del cliente. No diga que el producto no está disponible.',
+    };
   }
   const price = Number(product.price ?? product.precio);
   if (!Number.isFinite(price) || price < 0) {
@@ -29,7 +34,12 @@ export function buildPriceResult(product, rate = null) {
 
 export function buildStockResult(product) {
   if (!product || product.category === 'politica') {
-    return { ok: false, error: 'Ese código no es un producto de inventario.' };
+    return {
+      ok: false,
+      sku_desconocido: !product,
+      error: product ? 'Ese código no es un producto de inventario.' : 'Ese sku no está en el catálogo.',
+      instruccion: 'No invente un sku. Llame search_catalog con las palabras del cliente. No diga que el producto no está disponible.',
+    };
   }
   const stock = product.stock == null ? null : Number(product.stock);
   return {

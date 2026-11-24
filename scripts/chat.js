@@ -1,15 +1,25 @@
 // Chat de prueba en consola: conversa con Bárbara sin necesidad de WhatsApp.
-// Uso: npm run chat   (escriba "salir" para terminar, "reanudar" si el chat quedó escalado)
+// Uso: npm run chat   (escriba "salir" para terminar, "reanudar" o "#reanudar" si quedó escalado)
+import dotenv from 'dotenv';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig } from '../src/config.js';
-import { addMessage, initDb, resumeChat } from '../src/db.js';
-import { syncCatalog } from '../src/services/productSync.js';
-import { getCatalogInfo } from '../src/services/catalogService.js';
-import { finalizeHandoff, handleCustomerMessage } from '../src/services/chatService.js';
+
+dotenv.config();
+
+if (!process.env.PAGO_MOVIL_TELEFONO || !process.env.PAGO_MOVIL_CEDULA || !process.env.PAGO_MOVIL_BANCO) {
+  process.env.PAGO_MOVIL_TELEFONO ||= '04120000000';
+  process.env.PAGO_MOVIL_CEDULA ||= 'V00000000';
+  process.env.PAGO_MOVIL_BANCO ||= 'Banco de prueba';
+  console.warn('Aviso: pago móvil de prueba. Complete PAGO_MOVIL_TELEFONO, PAGO_MOVIL_CEDULA y PAGO_MOVIL_BANCO en .env antes de atender clientes.\n');
+}
+
+const { assertDatabaseConfig, assertGeminiConfig } = await import('../src/config.js');
+const { addMessage, initDb, resumeChat } = await import('../src/db.js');
+const { syncCatalog } = await import('../src/services/productSync.js');
+const { getCatalogInfo } = await import('../src/services/catalogService.js');
+const { finalizeHandoff, handleCustomerMessage } = await import('../src/services/chatService.js');
 
 assertGeminiConfig();
-assertBusinessConfig();
 assertDatabaseConfig();
 await initDb();
 await syncCatalog();
@@ -20,17 +30,19 @@ const rl = readline.createInterface({ input, output });
 const catalog = getCatalogInfo();
 
 console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
-console.log(`Chat de prueba con Bárbara (cliente: ${name}, +${phone}). Escriba "salir" para terminar.\n`);
+console.log('Chat de prueba con Bárbara (cliente: ' + name + ', +' + phone + ').');
+console.log('Escriba "salir" para terminar, o "reanudar" / "#reanudar" si quedó con el especialista.\n');
 
 const printNotice = async (text) => console.log(`\n  [Aviso al asesor]\n  ${text.split('\n').join('\n  ')}\n`);
 
 while (true) {
   const text = (await rl.question('Usted: ')).trim();
   if (!text) continue;
-  if (text.toLowerCase() === 'salir') break;
-  if (text.toLowerCase() === 'reanudar') {
+  const command = text.replace(/^#/, '').toLowerCase();
+  if (command === 'salir') break;
+  if (command === 'reanudar') {
     await resumeChat(phone);
-    console.log('(Bárbara reactivada)\n');
+    console.log('(Bárbara reactivada. Escriba "reanudar" o "#reanudar" si vuelve a quedar en pausa.)\n');
     continue;
   }
 
@@ -48,9 +60,8 @@ while (true) {
   }
   if (result.escalated && result.handoff) {
     await finalizeHandoff({ phone, name, handoff: result.handoff, notify: printNotice });
-    console.log('>>> [ESPECIALISTA] Escriba "reanudar" para seguir probando.\n');
-  }
-  else if (result.paused) console.log('(Chat pausado: un asesor lo atiende. Escriba "reanudar" para reactivar a Bárbara.)\n');
+    console.log('>>> [ESPECIALISTA] Escriba "reanudar" o "#reanudar" para seguir probando.\n');
+  } else if (result.paused) console.log('(Chat pausado: un asesor lo atiende. Escriba "reanudar" o "#reanudar" para reactivar a Bárbara.)\n');
 }
 
 rl.close();

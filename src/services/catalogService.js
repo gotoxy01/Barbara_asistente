@@ -156,12 +156,15 @@ function diminutiveBases(word) {
   return [...bases].filter((b) => b.length >= 3);
 }
 
-function normalize(text) {
-  return String(text ?? '')
+/** Minúsculas, sin acentos, y "P.A.N." queda en "pan". */
+export function normalize(text) {
+  let value = String(text ?? '')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9ñ.,/ ]+/g, ' ')
+    .replace(/\p{M}/gu, '');
+  value = value.replace(/\b(?:[a-zñ]\.)+[a-zñ]\b/g, (token) => token.replace(/\./g, ''));
+  return value
+    .replace(/[^a-z0-9ñ ]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -513,7 +516,10 @@ function scoreProduct(product, terms) {
  * @param {import('./bcvService.js').BcvRate|null} bcv
  */
 function formatProduct(product) {
-  return formatCatalogLine(product);
+  const line = formatCatalogLine(product);
+  const price = Number(product.precio);
+  if (!Number.isFinite(price)) return line;
+  return `${line} precio_usd=${price.toFixed(2)}`;
 }
 
 function rateLine() {
@@ -613,6 +619,10 @@ export function findProduct(query) {
 const embedCache = new Map();
 
 async function retrievalFor(result, queryText) {
+  // Si las palabras ya encontraron el producto, no se gasta otra llamada a embeddings.
+  if (result.type === 'matches' && !result.soft) {
+    return { ...result, retrievalScore: 0.95 };
+  }
   const products = getProducts();
   const keywordHits = (result.products || []).map((product, index, list) => ({
     sku: product.sku,

@@ -5,16 +5,16 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "start:cloud": "node src/server.js",
-    "start:qr": "node src/wweb.js",
-    "chat": "node scripts/chat.js",
-    "check": "node scripts/check-gemini.js",
+    "start": "node --use-system-ca src/server.js",
+    "start:cloud": "node --use-system-ca src/server.js",
+    "start:qr": "node --use-system-ca src/wweb.js",
+    "chat": "node --use-system-ca scripts/chat.js",
+    "check": "node --use-system-ca scripts/check-gemini.js",
     "test": "node --test ./test/*.test.js",
-    "migrate:sqlite": "node scripts/migrate-from-sqlite.js",
-    "setup": "node scripts/setup.js",
-    "db:create": "node scripts/db-create.js",
-    "doctor": "node scripts/doctor.js"
+    "migrate:sqlite": "node --use-system-ca scripts/migrate-from-sqlite.js",
+    "setup": "node --use-system-ca scripts/setup.js",
+    "db:create": "node --use-system-ca scripts/db-create.js",
+    "doctor": "node --use-system-ca scripts/doctor.js"
   },
   "engines": {
     "node": ">=22.13"

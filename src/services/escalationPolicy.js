@@ -3,6 +3,8 @@
  * El modelo propone confianza y un motivo; estas reglas no se las deja solo a él.
  */
 
+import { isOnlyGreetingOrControl } from './customerText.js';
+
 const HUMAN_RE = /hablar con (un |una )?(persona|asesor|humano|encargad)|asesor humano|persona real|quiero (un |una )?(asesor|persona|humano)|atenci[oó]n humana|comun[ií]queme con/i;
 const COMPLAINT_RE = /\b(queja|reclamo|reclamaci[oó]n|estafa|p[eé]sim[oa]|indignad[oa]|muy molest[oa]|no sirve|me enga[nñ]|timaron)\b/i;
 const WHOLESALE_RE = /\b(al mayor|al por mayor|por mayor|mayoreo|mayorista|cotizaci[oó]n especial)\b/i;
@@ -46,6 +48,9 @@ export function decideEscalation(input = {}) {
   }
 
   const text = String(input.customerText || '');
+  if (isOnlyGreetingOrControl(text)) {
+    return { escalate: false, ignore: false, reason: null, confianza: confianzaNum };
+  }
   const human = HUMAN_RE.test(text);
   const complaint = COMPLAINT_RE.test(text);
   const wholesale = WHOLESALE_RE.test(text);
@@ -53,10 +58,11 @@ export function decideEscalation(input = {}) {
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
     && QUOTE_RE.test(text);
-  const retrievalLow = input.retrievalScore != null
+  const retrievalPct = input.retrievalScore == null ? null : Math.round(Number(input.retrievalScore) * 100);
+  const retrievalLow = retrievalPct != null
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
-    && Number(input.retrievalScore) * 100 <= threshold;
+    && retrievalPct <= threshold;
   const low = confianzaNum <= threshold || retrievalLow;
   const modelAsked = input.requiereEspecialista === true;
 
@@ -64,16 +70,17 @@ export function decideEscalation(input = {}) {
     return { escalate: false, ignore: false, reason: null, confianza: confianzaNum };
   }
 
+  const shown = retrievalLow && retrievalPct != null ? retrievalPct : confianzaNum;
   const reason = motivo
     || (human && 'El cliente pidió un asesor')
     || (complaint && 'Queja o reclamo')
     || (wholesale && 'Cotización al mayor')
     || (outOfCatalog && 'Consulta fuera de catálogo')
-    || (retrievalLow && `La búsqueda del catálogo no llegó al ${threshold}%`)
+    || (retrievalLow && `La búsqueda del catálogo quedó en ${retrievalPct}%, por debajo del ${threshold}%`)
     || (low && `Confianza ${confianzaNum}% ≤ ${threshold}%`)
     || 'El modelo pidió especialista';
 
-  return { escalate: true, ignore: false, reason, confianza: confianzaNum };
+  return { escalate: true, ignore: false, reason, confianza: shown };
 }
 
 /** Al escalar, no se reenvía una cotización con montos. */

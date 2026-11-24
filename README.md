@@ -10,7 +10,7 @@ Todos los datos (número de WhatsApp, asesor, pago móvil, claves) se cambian en
 
 1. Instale Node.js 22 y PostgreSQL 16 con pgvector. El detalle está en [docs/instalacion-windows.md](docs/instalacion-windows.md).
 2. Doble clic en `configurar-barbara.bat`, o en una consola: `npm run setup`.
-3. Se abre `.env`. Complete el token de Meta, el Phone number ID, el secreto, la clave de Gemini, el pago móvil y las dos direcciones de Postgres. Guarde y cierre.
+3. Le pide la clave del usuario `postgres` (no se ve al escribir). La clave de la base `barbara` y la frase del panel las inventa y las guarda en `.env`. Después se abre el archivo para el token de Meta, el Phone number ID y Gemini.
 4. El mismo paso crea la base si aún no existe.
 5. `npm run doctor` debe mostrar OK en cada línea.
 6. `npm start`.

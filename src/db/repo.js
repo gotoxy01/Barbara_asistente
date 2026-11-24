@@ -232,6 +232,7 @@ export async function getHistory(phone, limit = config.historyLimit) {
       WHERE c.wa_id = $1
         AND m.created_at >= to_timestamp($2 / 1000.0)
         AND m.content <> '[sin respuesta]'
+        AND COALESCE(m.raw_payload->>'durante_pausa', '') <> 'si'
       ORDER BY m.created_at DESC, m.seq DESC
       LIMIT $3
     ) recent
@@ -251,6 +252,7 @@ export async function listLatestMessagesSince(sinceMs) {
     JOIN conversations conv ON conv.id = m.conversation_id
     JOIN contacts c ON c.id = conv.contact_id
     WHERE m.created_at >= to_timestamp($1 / 1000.0)
+      AND COALESCE(m.raw_payload->>'durante_pausa', '') <> 'si'
     ORDER BY c.wa_id, m.created_at DESC, m.seq DESC
   `, [sinceMs]);
   return rows.map((row) => ({
@@ -268,6 +270,7 @@ export async function getLatestMessage(phone) {
     JOIN conversations conv ON conv.id = m.conversation_id
     JOIN contacts c ON c.id = conv.contact_id
     WHERE c.wa_id = $1
+      AND COALESCE(m.raw_payload->>'durante_pausa', '') <> 'si'
     ORDER BY m.created_at DESC, m.seq DESC
     LIMIT 1
   `, [phone]);

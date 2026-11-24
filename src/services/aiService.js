@@ -72,7 +72,7 @@ export class GeminiError extends Error {
   }
 }
 
-function classifyError(err) {
+export function classifyError(err) {
   if (err instanceof GeminiError) return err;
   const message = String(err?.message ?? err);
   const status = Number(err?.status ?? message.match(/"code"\s*:\s*(\d{3})/)?.[1] ?? 0);
@@ -85,9 +85,13 @@ function classifyError(err) {
     return new GeminiError(message, { status, kind: 'auth', retryable: false,
       hint: 'La clave no es válida para la Gemini API. Genere una en https://aistudio.google.com/apikey' });
   }
-  if (status === 404 || status === 400) {
+  if (status === 404) {
+    return new GeminiError(message, { status, kind: 'model', retryable: true,
+      hint: `El modelo no existe; se prueba el siguiente. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
+  }
+  if (status === 400) {
     return new GeminiError(message, { status, kind: 'model', retryable: false,
-      hint: `Revise GEMINI_MODEL (actual: ${config.gemini.model}); ejecute "npm run check" para ver los modelos disponibles.` });
+      hint: `Gemini rechazó el pedido. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
   }
   if (status === 429) {
     const quota = /quota|per day|limit: 0/i.test(message);
@@ -171,8 +175,11 @@ async function withRetries(fn, turn) {
 
     turn.model = model;
     await acquireGemini();
+    const startedCall = Date.now();
     try {
-      return await fn(model);
+      const value = await fn(model);
+      verbose(`Gemini ${model} respondió en ${Date.now() - startedCall} ms`);
+      return value;
     } catch (err) {
       lastError = classifyError(err);
       if (!lastError.retryable || Date.now() - started >= budget) throw lastError;

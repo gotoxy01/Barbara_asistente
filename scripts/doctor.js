@@ -104,8 +104,23 @@ async function metaOk() {
   }
 }
 
+async function httpsOk() {
+  try {
+    const response = await fetch('https://ve.dolarapi.com/v1/dolares/oficial', { signal: AbortSignal.timeout(8000) });
+    mark(response.ok, 'Internet HTTPS', response.ok ? 'la tasa BCV responde' : `el sitio respondió ${response.status}`);
+  } catch (err) {
+    const text = String(err?.message || err);
+    if (/SELF_SIGNED_CERT_IN_CHAIN|unable to verify the first certificate|UNABLE_TO_VERIFY/i.test(text)) {
+      mark(false, 'Internet HTTPS', 'el antivirus de la empresa cambia el certificado. Use los comandos npm (ya traen --use-system-ca) o arranque Node con --use-system-ca.');
+      return;
+    }
+    mark(false, 'Internet HTTPS', 'no se pudo salir a internet. Revise la conexión.');
+  }
+}
+
 nodeOk();
 envOk();
+await httpsOk();
 await geminiOk();
 await postgresOk();
 await metaOk();

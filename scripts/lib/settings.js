@@ -63,6 +63,40 @@ export function quoteLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+export function postgresUrl({ user, password, host = '127.0.0.1', port = '5432', database }) {
+  const url = new URL('postgresql://127.0.0.1');
+  url.username = user;
+  url.password = password;
+  url.hostname = host || '127.0.0.1';
+  url.port = String(port || '5432');
+  url.pathname = `/${database}`;
+  return url.toString();
+}
+
+export function setEnvLine(text, key, value) {
+  const line = `${key}=${value}`;
+  const pattern = new RegExp(`^${key}=.*$`, 'm');
+  if (pattern.test(text)) return text.replace(pattern, line);
+  return `${text.replace(/\s*$/, '')}\n${line}\n`;
+}
+
+/** Arma las direcciones de Postgres y la frase del panel. Codifica la clave en la URL. */
+export function fillDatabaseSecrets(envText, { adminPassword, dbPassword, crmToken, host = '127.0.0.1', port = '5432' }) {
+  let text = envText;
+  if (adminPassword) {
+    text = setEnvLine(text, 'POSTGRES_ADMIN_URL', postgresUrl({
+      user: 'postgres', password: adminPassword, host, port, database: 'postgres',
+    }));
+  }
+  if (dbPassword) {
+    text = setEnvLine(text, 'DATABASE_URL', postgresUrl({
+      user: 'barbara', password: dbPassword, host, port, database: 'barbara',
+    }));
+  }
+  if (crmToken) text = setEnvLine(text, 'CRM_TOKEN', crmToken);
+  return text;
+}
+
 export function explainPgError(err) {
   const code = err?.code;
   const message = String(err?.message || err || '');

@@ -39,18 +39,18 @@ export const config = {
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
-    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
     // Reintentos solo para fallas pasajeras (429 por ráfaga, 5xx, tiempo agotado).
-    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 4),
+    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 2),
     // Tope de espera reintentando un mismo mensaje.
-    retryBudgetMs: Number(process.env.GEMINI_RETRY_BUDGET_MS || 45000),
+    retryBudgetMs: Number(process.env.GEMINI_RETRY_BUDGET_MS || 15000),
     // Cuántos clientes puede atender Gemini a la vez. Más de esto satura el modelo y Google responde 503.
     concurrency: Number(process.env.GEMINI_CONCURRENCY || 2),
     // Modelo que se usa si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-2.5-flash',
-    stableModels: (process.env.GEMINI_STABLE_MODELS || 'gemini-3.8-flash,gemini-2.5-flash')
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-flash-latest',
+    stableModels: (process.env.GEMINI_STABLE_MODELS || 'gemini-3.5-flash,gemini-flash-latest')
       .split(',').map((name) => name.trim()).filter(Boolean),
-    timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 20000),
+    timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 12000),
   },
   // Segunda pasada: revisa precios/cálculos del borrador antes de WhatsApp. AUDITOR_ENABLED=false para desactivar.
   auditor: {

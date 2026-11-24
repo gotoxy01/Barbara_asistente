@@ -4,6 +4,7 @@ import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
+import { historyForModel, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
 import { searchProducts } from './catalogService.js';
@@ -231,58 +232,38 @@ function greetingReply(text, isNewConversation) {
  * Evita que "¿hay de la pequeña?" se interprete como otro producto (ej. bolsa de hielo)
  * cuando el cliente venía hablando de samba/chocolate u otra cosa.
  */
-async function buildProductContext(history, bcv) {
-  const lastReply = history.map((m) => m.role).lastIndexOf('model');
-  const pending = history
-    .slice(lastReply + 1)
-    .filter((m) => m.role === 'user' && !String(m.content).startsWith('[El cliente'))
-    .map((m) => cleanMsgContent(m.content))
-    .filter(Boolean)
-    .slice(-5);
-
-  const thread = recentThread(history, THREAD_FOLLOW_MSGS);
-  const threadBlob = thread.map((m) => m.content).join('\n');
-  const pendingBlob = pending.join('\n');
-  const followUp = !pending.length || isShortFollowUp(pendingBlob)
-    || /pequeñ|grand|median|esa|ese|esos|esas|otra|otro|mismo|misma|de\s+la|de\s+el|y\s+el|y\s+la/i.test(pendingBlob);
-
-  let result = pending.length ? await searchProducts(pending, { bcv }) : await searchProducts(threadBlob, { bcv });
-
-  // Seguimiento o coincidencia floja → buscar con los últimos 4 mensajes del hilo.
-  if (followUp || result.type === 'none' || result.soft) {
-    const withThread = await searchProducts(
-      thread.length ? `${threadBlob}\n${pendingBlob}`.trim() : pendingBlob,
-      { bcv },
-    );
-    if (withThread.type === 'matches') {
-      const hilo = thread
-        .map((m) => `• ${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${m.content}`)
-        .join('\n');
-      result = {
-        ...withThread,
-        text: [
-          `SEGUIMIENTO DEL HILO (últimos ${thread.length || 1} mensajes — la pregunta actual continúa ESTE tema; no cambie de producto):`,
-          hilo || pendingBlob,
-          '',
-          withThread.text,
-          '',
-          'Si el cliente dijo “pequeña/grande/esa/la de…”, filtre las opciones ANTERIORES del mismo producto (ej. chocolates), no ofrezca un producto distinto.',
-        ].join('\n'),
-      };
-    } else if (result.type === 'none' && pending.length) {
-      const previousUsers = history
-        .slice(0, lastReply + 1)
-        .filter((m) => m.role === 'user')
-        .map((m) => cleanMsgContent(m.content))
-        .filter(Boolean)
-        .slice(-3);
-      if (previousUsers.length) {
-        const retry = await searchProducts([...previousUsers, ...pending], { bcv });
-        if (retry.type === 'matches') result = retry;
-      }
-    }
+async function buildProductContext(history, bcv, currentText = '') {
+  if (isOnlyGreetingOrControl(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      text: 'CONSULTA GENERAL (saludo o comando): no mencione productos ni diga que no hay.',
+    };
   }
-
+  const current = substantiveLines(currentText);
+  const earlier = substantiveLines(
+    (history || [])
+      .filter((message) => message.role === 'user')
+      .map((message) => cleanMsgContent(message.content))
+      .join('\n'),
+  );
+  const followUp = current.length === 1 && isShortFollowUp(current[0]);
+  const query = (followUp ? [...earlier.slice(-4), ...current] : current).join('\n')
+    || earlier.slice(-3).join('\n');
+  if (!query.trim()) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      text: 'CONSULTA GENERAL (sin un producto específico): no mencione productos.',
+    };
+  }
+  const started = Date.now();
+  const result = await searchProducts(query, { bcv });
+  verbose(`Búsqueda de catálogo en ${Date.now() - started} ms (${result.type}, ${result.products?.length || 0} productos).`);
   return result;
 }
 
@@ -322,7 +303,8 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     const latest = await db.getLatestMessage(phone);
     if (latest?.role === 'model') return { reply: null, escalated: false, paused: false, duplicate: true };
   } else {
-    await db.addMessage(phone, 'user', text, wamid);
+    const durantePausa = chat.status === 'SPECIALIST' || chat.paused === 1 || chat.paused === true;
+    await db.addMessage(phone, 'user', text, wamid, durantePausa ? { raw: { durante_pausa: 'si' } } : {});
   }
   const displayName = chat.name || name;
 
@@ -348,7 +330,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     await resetCustomerOrderSession(phone, { quiet: true });
   }
 
-  const history = await db.getHistory(phone);
+  const history = historyForModel(await db.getHistory(phone));
   const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
@@ -367,6 +349,8 @@ async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
  * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
  */
 async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
+  history = historyForModel(history);
+  const turnStarted = Date.now();
   const bcv = await getBcvRate();
   // Tras cancelar se corta el historial; siempre se conservan al menos los últimos 4 msgs del hilo.
   let scopedHistory = trimHistorySinceCancel(history);
@@ -379,7 +363,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     scopedHistory = trimHistorySinceCancel(history).slice(-THREAD_FOLLOW_MSGS);
   }
 
-  const products = await buildProductContext(scopedHistory, bcv);
+  const products = await buildProductContext(scopedHistory, bcv, text);
   const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
   const customerText = customerTextWithThread(scopedHistory, text);
   const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
@@ -394,7 +378,9 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let salesMeta = null;
   const pendingBefore = pendingWeighItems((await db.getActiveOrder(phone))?.items ?? []).length;
   try {
+    verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini.`);
     const result = await generateBarbaraReply(systemPrompt, scopedHistory, tools);
+    verbose(`Gemini respondió en ${Date.now() - turnStarted} ms (${result.model || 'sin modelo'}).`);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
     const decision = decideEscalation({
       confianza: result.confianza ?? 0,
@@ -426,6 +412,12 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       escalated = false;
     }
     toolCalls = result.toolCalls;
+    const checked = replyIfInventedSku(reply, toolCalls);
+    if (checked) {
+      reply = checked;
+      escalated = false;
+      decision.reason = null;
+    }
     model = result.model;
     salesMeta = {
       producto: result.producto || null,
@@ -446,7 +438,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     reply = `${RESUME_NOTE}\n\n${reply}`;
   }
 
-  if (reply && !escalated && shouldAuditReply(reply, tools?.state)) {
+  if (reply && !escalated && shouldAuditReply(reply, tools?.state, productContext)) {
     const orderContext = await renderOrderContext(phone, bcv);
     const audited = await runAuditor({
       phone,
@@ -475,11 +467,14 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
 }
 
 /** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
-function shouldAuditReply(reply, state = {}) {
+function shouldAuditReply(reply, state = {}, productContext = '') {
   if (!config.auditor.enabled) return false;
   if (!reply || FAILURE_REPLY_RE.test(reply)) return false;
   if (state.boleta || state.addressSaved) return false;
-  return true;
+  const amounts = String(reply).match(/\d+[.,]\d{2}/g) || [];
+  if (!amounts.length) return false;
+  // Si el monto ya salió de la base, no hace falta una segunda llamada al modelo.
+  return amounts.some((amount) => !productContext.includes(amount) && !productContext.includes(amount.replace(',', '.')));
 }
 
 /**
