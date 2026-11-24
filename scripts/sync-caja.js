@@ -3,8 +3,9 @@
 // Uso: npm run sync
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { projectRootFromScript } from './lib/script-path.js';
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const root = projectRootFromScript(import.meta.url);
 dotenv.config({ path: path.join(root, '.env') });
 process.env.CATALOG_SOURCE = 'db';
 process.env.CATALOG_DB_PATH ||= path.join(root, 'data', 'caja-demo', 'database.db');

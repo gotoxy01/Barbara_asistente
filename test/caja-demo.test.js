@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { createDemoDatabase, summarizeDatabase } from '../scripts/crear-caja-demo.js';
+import { projectRootFromScript } from '../scripts/lib/script-path.js';
 
 describe('caja de prueba', () => {
   it('genera el esquema de la caja y el importador deja fuera lo que no se vende', () => {
@@ -21,7 +22,7 @@ describe('caja de prueba', () => {
     assert.ok(summary.soloCodigo >= 3);
     assert.equal(summary.deliveryUsd, 1.5);
 
-    const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+    const root = projectRootFromScript(import.meta.url);
     const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
       const { readSourceCatalog } = await import('./src/services/catalogService.js');
       const source = readSourceCatalog();

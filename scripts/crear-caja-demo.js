@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { buildSeed } from '../data/caja-demo/semilla.js';
+import { isDirectRun, projectRootFromScript } from './lib/script-path.js';
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const root = projectRootFromScript(import.meta.url);
 const dir = path.join(root, 'data', 'caja-demo');
 const target = path.join(dir, 'database.db');
 
@@ -124,7 +125,7 @@ export function summarizeDatabase(file = target) {
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+if (isDirectRun(import.meta.url, import.meta.main)) {
   const started = performance.now();
   createDemoDatabase(target);
   const summary = summarizeDatabase(target);
