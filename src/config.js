@@ -19,7 +19,7 @@ export const config = {
     // false por defecto: la consola no se llena con cada mensaje de WhatsApp.
     debug: /^(1|true|si|sí|yes)$/i.test(process.env.WWEB_DEBUG || 'false'),
     // Grupos donde Bárbara atiende a quien escribe, pero siempre respondiéndole por privado.
-    groupNames: (process.env.WWEB_GROUPS ?? 'Bodega los cuchos').split(',').map((g) => g.trim()).filter(Boolean),
+    groupNames: (process.env.WWEB_GROUPS ?? '').split(',').map((g) => g.trim()).filter(Boolean),
   },
   // true = imprime cada Cliente / Bárbara respondió (útil para depurar).
   logVerbose: /^(1|true|si|sí|yes)$/i.test(process.env.LOG_VERBOSE || 'false'),
@@ -48,6 +48,8 @@ export const config = {
     concurrency: Number(process.env.GEMINI_CONCURRENCY || 2),
     // Modelo que se usa si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
     fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-2.5-flash',
+    stableModels: (process.env.GEMINI_STABLE_MODELS || 'gemini-3.8-flash,gemini-2.5-flash')
+      .split(',').map((name) => name.trim()).filter(Boolean),
     timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 20000),
   },
   // Segunda pasada: revisa precios/cálculos del borrador antes de WhatsApp. AUDITOR_ENABLED=false para desactivar.
@@ -80,6 +82,7 @@ export const config = {
   timezone: process.env.TIMEZONE || 'America/Caracas',
   dbPath: process.env.DB_PATH || 'barbara.db',
   databaseUrl: process.env.DATABASE_URL || '',
+  postgresAdminUrl: process.env.POSTGRES_ADMIN_URL || '',
   redisUrl: process.env.REDIS_URL || '',
   embedding: {
     model: process.env.EMBEDDING_MODEL || 'gemini-embedding-001',

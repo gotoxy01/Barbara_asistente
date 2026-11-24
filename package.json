@@ -11,7 +11,10 @@
     "chat": "node scripts/chat.js",
     "check": "node scripts/check-gemini.js",
     "test": "node --test ./test/*.test.js",
-    "migrate:sqlite": "node scripts/migrate-from-sqlite.js"
+    "migrate:sqlite": "node scripts/migrate-from-sqlite.js",
+    "setup": "node scripts/setup.js",
+    "db:create": "node scripts/db-create.js",
+    "doctor": "node scripts/doctor.js"
   },
   "engines": {
     "node": ">=22.13"

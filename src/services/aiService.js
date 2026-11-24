@@ -107,7 +107,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MAX_TOOL_ROUNDS = 6;
 
-const STABLE_MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash'];
 const COOLDOWN_MS = 25_000;
 
 /** El principal, los flash estables y al final el respaldo si es un modelo lite (se saturan primero). */
@@ -116,7 +115,7 @@ function modelRotation(current) {
   const lite = (name) => /lite/i.test(name ?? '');
   const ordered = [current || config.gemini.model];
   if (fallback && !lite(fallback)) ordered.push(fallback);
-  ordered.push(...STABLE_MODELS);
+  ordered.push(...config.gemini.stableModels);
   if (fallback && lite(fallback)) ordered.push(fallback);
   return [...new Set(ordered.filter(Boolean))];
 }

@@ -4,6 +4,21 @@ Asistente de WhatsApp de la bodega. El canal principal es la **WhatsApp Cloud AP
 
 El modo con código QR (`whatsapp-web.js`) queda como respaldo.
 
+Todos los datos (número de WhatsApp, asesor, pago móvil, claves) se cambian en un solo archivo: **`.env`**.
+
+## Primeros pasos
+
+1. Instale Node.js 22 y PostgreSQL 16 con pgvector. El detalle está en [docs/instalacion-windows.md](docs/instalacion-windows.md).
+2. Doble clic en `configurar-barbara.bat`, o en una consola: `npm run setup`.
+3. Se abre `.env`. Complete el token de Meta, el Phone number ID, el secreto, la clave de Gemini, el pago móvil y las dos direcciones de Postgres. Guarde y cierre.
+4. El mismo paso crea la base si aún no existe.
+5. `npm run doctor` debe mostrar OK en cada línea.
+6. `npm start`.
+
+Para cambiar el número del negocio o el del asesor, edite `.env` y vuelva a iniciar. No hace falta modificar el programa.
+
+Si la base ya está instalada y solo quiere crearla de nuevo: `npm run db:create`.
+
 ## 1. Instalación
 
 ```powershell

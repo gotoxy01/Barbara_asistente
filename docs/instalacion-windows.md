@@ -17,7 +17,7 @@ CREATE DATABASE barbara OWNER barbara;
 CREATE EXTENSION vector;
 ```
 
-4. En el `.env` de Bárbara:
+4. Doble clic en `configurar-barbara.bat`. Ese paso crea `.env`, lo abre y crea la base. Si prefiere la consola: `npm run setup`. Las direcciones quedan así en `.env`:
 
 ```env
 DATABASE_URL=postgresql://barbara:una-clave-larga@127.0.0.1:5432/barbara
