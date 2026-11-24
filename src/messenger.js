@@ -1,5 +1,10 @@
 // Punto único de envío de mensajes, independiente del canal (whatsapp-web.js o Cloud API de Meta).
 
+import { config } from './config.js';
+import * as db from './db.js';
+import { isWithinServiceWindow } from './services/window.js';
+import { isServiceWindowError, sendTemplate } from './whatsapp.js';
+
 let sender = null;
 let interactiveSender = null;
 let selfPhone = '';
@@ -37,9 +42,48 @@ export function getSelfPhone() {
   return selfPhone;
 }
 
+function templateRecord() {
+  const name = config.whatsapp.templateName || 'sin_nombre';
+  return `[Plantilla ${name} enviada: fuera de la ventana de 24 h no se puede mandar texto libre]`;
+}
+
+/** Texto que queda en el historial: la plantilla, si el texto libre no estaba permitido. */
+export function outboundRecord(result, text) {
+  if (result?.mode === 'template') return templateRecord();
+  return text;
+}
+
+function freeTextAllowed(phone) {
+  const chat = db.getChat(phone);
+  return isWithinServiceWindow(chat?.last_user_message_at, Date.now(), config.serviceWindowHours);
+}
+
+async function sendApprovedTemplate(phone, reason) {
+  console.warn(`[${phone}] ${reason} Se envía la plantilla "${config.whatsapp.templateName}".`);
+  await sendTemplate(phone);
+  return { mode: 'template' };
+}
+
+/**
+ * Envía texto libre, o la plantilla aprobada si la ventana de 24 h está cerrada
+ * (también si Meta responde 131047).
+ * @returns {Promise<{ mode: 'text'|'template', recovered?: boolean }>}
+ */
 export async function sendMessage(phone, text) {
   if (!sender) throw new Error('El canal de WhatsApp aún no está conectado');
-  await sender(phone, text);
+  if (channel === 'cloud' && !freeTextAllowed(phone)) {
+    return sendApprovedTemplate(phone, 'Fuera de la ventana de 24 h.');
+  }
+  try {
+    await sender(phone, text);
+    return { mode: 'text' };
+  } catch (err) {
+    if (channel === 'cloud' && isServiceWindowError(err)) {
+      const sent = await sendApprovedTemplate(phone, 'WhatsApp devolvió 131047.');
+      return { ...sent, recovered: true };
+    }
+    throw err;
+  }
 }
 
 /**

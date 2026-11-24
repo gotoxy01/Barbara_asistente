@@ -1,6 +1,6 @@
 import * as db from '../db.js';
 import { publishCrm } from '../crm/events.js';
-import { sendMessage } from '../messenger.js';
+import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import {
   applyNotAvailable,
@@ -307,8 +307,11 @@ export async function noteKitchenStatus(noteId, status, { notifyCustomer = true 
     if (message) {
       try {
         const forCustomer = message.replace(/\[PEDIDO_CANCELADO\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
-        await sendMessage(order.phone, forCustomer);
-        db.addMessage(order.phone, 'model', message);
+        const sent = await sendMessage(order.phone, forCustomer);
+        const stored = outboundRecord(sent, message);
+        db.addMessage(order.phone, 'model', stored.includes('[PEDIDO_CANCELADO]') || !message.includes('[PEDIDO_CANCELADO]')
+          ? stored
+          : `${stored}\n[PEDIDO_CANCELADO]`);
       } catch (err) {
         return { ok: true, order, warning: `Estado guardado, pero no se pudo avisar al cliente: ${err.message}` };
       }
@@ -354,8 +357,8 @@ export async function noteDeleteCanceled(noteId) {
 }
 
 async function deliverAndClose(ticket, message, extraResolveKinds = []) {
-  await sendMessage(ticket.clienteTelefono, message);
-  db.addMessage(ticket.clienteTelefono, 'model', message);
+  const sent = await sendMessage(ticket.clienteTelefono, message);
+  db.addMessage(ticket.clienteTelefono, 'model', outboundRecord(sent, message));
   db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'weigh');
   db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'payment');
   db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'ticket');

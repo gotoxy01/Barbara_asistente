@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
-import { sendMessage } from '../messenger.js';
+import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from './bcvService.js';
 import { notifyAdvisor, recordAdvisorMessage } from './chatService.js';
 import { applyNotAvailable, applyWeighedPrice, pendingWeighItems } from './orderService.js';
@@ -15,7 +15,7 @@ const HELP =
   '#b: ver los pedidos pendientes\n' +
   '#b <teléfono>: borrar el pedido pendiente de ese cliente\n' +
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
-  '#pausar <teléfono>: pausar a Bárbara en ese chat\n' +
+  '#pausar <teléfono>: pasar el chat a especialista (Bárbara no responde hasta #reanudar)\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
   '#ayuda: ver esta lista';
 
@@ -129,8 +129,8 @@ async function deliverToCustomer(phone, result, confirmation) {
     return;
   }
   try {
-    await sendMessage(phone, result.message);
-    db.addMessage(phone, 'model', result.message);
+    const sent = await sendMessage(phone, result.message);
+    db.addMessage(phone, 'model', outboundRecord(sent, result.message));
     db.resolveAlertsByPhoneKind(phone, 'weigh');
     await ack(confirmation);
   } catch (err) {
@@ -172,8 +172,8 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
     case 'pausar':
       if (!phone) break;
       db.upsertChat(phone, null);
-      db.pauseChat(phone);
-      await ack(`⏸️ Bárbara pausada para +${phone}.`);
+      db.setSpecialist(phone);
+      await ack(`⏸️ +${phone} quedó con el especialista. Bárbara no responde hasta #reanudar.`);
       return true;
     case 'reanudar':
       if (!phone) break;
@@ -185,10 +185,15 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
     case 'responder':
       if (!phone || !rest.trim()) break;
       try {
-        await sendMessage(phone, rest.trim());
-        recordAdvisorMessage(phone, rest.trim());
-        db.pauseChat(phone, manualPauseMs());
-        await ack(`✅ Enviado a +${phone}. Bárbara se reactiva sola en ${config.manualPauseMinutes} min.`);
+        const sent = await sendMessage(phone, rest.trim());
+        recordAdvisorMessage(phone, outboundRecord(sent, rest.trim()));
+        const specialist = db.getChat(phone)?.status === 'SPECIALIST';
+        if (!specialist) db.pauseChat(phone, manualPauseMs());
+        await ack(sent?.mode === 'template'
+          ? `✅ La ventana de 24 h está cerrada: a +${phone} se le envió la plantilla, no el texto libre.`
+          : specialist
+            ? `✅ Enviado a +${phone}. El chat sigue con el especialista.`
+            : `✅ Enviado a +${phone}. Bárbara se reactiva sola en ${config.manualPauseMinutes} min.`);
       } catch (err) {
         await ack(`❌ No se pudo enviar a +${phone}: ${err.message}`);
       }

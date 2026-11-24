@@ -2,8 +2,8 @@ node_modules/
 .wwebjs_auth/
 .wwebjs_cache/
 .env
-.env.example
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+operator-tickets.json

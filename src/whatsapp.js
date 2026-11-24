@@ -16,9 +16,23 @@ async function post(path, body) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(`WhatsApp API ${res.status}: ${JSON.stringify(data.error || data)}`);
+    throw new WhatsAppApiError(res.status, data);
   }
   return data;
+}
+
+export class WhatsAppApiError extends Error {
+  constructor(status, data) {
+    super(`WhatsApp API ${status}: ${JSON.stringify(data?.error || data)}`);
+    this.name = 'WhatsAppApiError';
+    this.status = status;
+    this.code = Number(data?.error?.code) || null;
+  }
+}
+
+/** Meta rechaza texto libre fuera de la ventana de 24 h con el código 131047. */
+export function isServiceWindowError(err) {
+  return Number(err?.code) === 131047 || /131047/.test(String(err?.message ?? ''));
 }
 
 export function sendText(to, text) {
@@ -57,6 +71,20 @@ export function sendInteractiveButtons(to, { bodyText, buttons, footer }) {
   });
 }
 
+/** Plantilla preaprobada. Es el único envío permitido fuera de la ventana de 24 h. */
+export function sendTemplate(to, name = config.whatsapp.templateName, lang = config.whatsapp.templateLang) {
+  if (!name) throw new Error('Falta WHATSAPP_TEMPLATE_NAME para escribir fuera de la ventana de 24 h');
+  return post('messages', {
+    recipient_type: 'individual',
+    to,
+    type: 'template',
+    template: {
+      name,
+      language: { code: lang || 'es' },
+    },
+  });
+}
+
 /** Marca el mensaje como leído y muestra "escribiendo..." al cliente (hasta 25 s o hasta que llegue la respuesta). */
 export function markAsRead(messageId) {
   return post('messages', { status: 'read', message_id: messageId, typing_indicator: { type: 'text' } });
@@ -73,16 +101,21 @@ export async function downloadMedia(mediaId) {
   return { mimeType, data: Buffer.from(await fileRes.arrayBuffer()).toString('base64') };
 }
 
-export function isValidSignature(rawBody, signatureHeader) {
-  if (!config.whatsapp.appSecret) return true;
-  if (!signatureHeader?.startsWith('sha256=')) return false;
-  const expected = crypto
-    .createHmac('sha256', config.whatsapp.appSecret)
-    .update(rawBody)
-    .digest('hex');
+/**
+ * Firma HMAC-SHA256 del cuerpo crudo. Sin secreto, o con cabecera ausente, rechaza.
+ * @param {Buffer|string|null|undefined} rawBody
+ * @param {string|undefined} signatureHeader  valor de X-Hub-Signature-256
+ * @param {string} appSecret
+ */
+export function verifyHubSignature(rawBody, signatureHeader, appSecret) {
+  if (!appSecret || rawBody == null) return false;
+  if (typeof signatureHeader !== 'string' || !signatureHeader.startsWith('sha256=')) return false;
+  const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
   const received = signatureHeader.slice('sha256='.length);
-  return (
-    expected.length === received.length &&
-    crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received))
-  );
+  if (expected.length !== received.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(received));
+}
+
+export function isValidSignature(rawBody, signatureHeader) {
+  return verifyHubSignature(rawBody, signatureHeader, config.whatsapp.appSecret);
 }

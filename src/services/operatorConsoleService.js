@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { info, verbose, error as logError } from '../log.js';
-import { getSelfPhone, getChannel, sendInteractiveButtons, sendMessage } from '../messenger.js';
+import { getSelfPhone, getChannel, outboundRecord, sendInteractiveButtons, sendMessage } from '../messenger.js';
 import { draftFromOperatorInstruction } from './aiService.js';
 import { getBcvRate } from './bcvService.js';
 import { searchProducts } from './catalogService.js';
@@ -199,8 +199,8 @@ async function replyOperator(text) {
 }
 
 async function sendToCustomer(ticket, text) {
-  await sendMessage(ticket.clienteTelefono, text);
-  db.addMessage(ticket.clienteTelefono, 'model', text);
+  const sent = await sendMessage(ticket.clienteTelefono, text);
+  db.addMessage(ticket.clienteTelefono, 'model', outboundRecord(sent, text));
   db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'weigh');
   db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'ticket');
 }

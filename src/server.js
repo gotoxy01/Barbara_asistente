@@ -1,14 +1,16 @@
-// Bárbara conectada a la WhatsApp Cloud API oficial de Meta (webhook).
-// Uso: npm run start:cloud   (la opción principal es "npm start", con código QR)
+// Bárbara en la WhatsApp Cloud API oficial de Meta (canal principal).
+// Uso: npm start
 import express from 'express';
-import { config, assertGeminiConfig, assertWhatsAppConfig } from './config.js';
+import { assertBusinessConfig, assertGeminiConfig, assertWhatsAppConfig, config } from './config.js';
+import { startCrmServer } from './crm/server.js';
 import * as db from './db.js';
+import { warn } from './log.js';
 import { setChannel, setInteractiveSender, setSender } from './messenger.js';
-import { enqueue } from './queue.js';
+import { createInboundQueue, enqueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
-import { getCatalogInfo } from './services/catalogService.js';
-import { handleCustomerMessage } from './services/chatService.js';
+import { warnIfDemoCatalog } from './services/catalogService.js';
+import { completeCustomerTurn, handleCustomerMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
 import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
 import {
@@ -21,14 +23,23 @@ import {
 
 assertWhatsAppConfig();
 assertGeminiConfig();
+assertBusinessConfig();
 setChannel('cloud');
 setSender((phone, text) => sendText(phone, text));
 setInteractiveSender((phone, payload) => sendInteractiveButtons(phone, payload));
 
+startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
+startResumeLoop();
+
+const inbound = createInboundQueue({
+  windowMs: config.debounceWindowMs,
+  onFlush: (phone, items) => processBatch(phone, items),
+});
+
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
-app.get('/', (_req, res) => res.send('Bárbara - Abasto Los Cuchos: en línea ✅'));
+app.get('/', (_req, res) => res.send('Bárbara - Abasto Los Cuchos: en línea'));
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -41,9 +52,13 @@ app.get('/webhook', (req, res) => {
   return res.sendStatus(403);
 });
 
+function usableId(id) {
+  return typeof id === 'string' && id.trim().length > 0;
+}
+
 app.post('/webhook', (req, res) => {
   if (!isValidSignature(req.rawBody, req.get('x-hub-signature-256'))) {
-    console.warn('Firma de webhook inválida; petición descartada');
+    console.warn('Firma de webhook ausente o inválida; petición rechazada');
     return res.sendStatus(401);
   }
 
@@ -55,8 +70,17 @@ app.post('/webhook', (req, res) => {
       const value = change.value ?? {};
       const contacts = value.contacts ?? [];
       for (const message of value.messages ?? []) {
+        if (!usableId(message?.id)) {
+          console.warn('Webhook sin wamid; mensaje omitido');
+          continue;
+        }
+        if (db.isDuplicateEvent(message.id)) continue;
         const name = contacts.find((c) => c.wa_id === message.from)?.profile?.name;
-        enqueue(message.from, () => processMessage(message, name));
+        if (config.advisorPhone && message.from === config.advisorPhone) {
+          enqueue(message.from, () => processAdvisor(message, name));
+        } else {
+          inbound.push(message.from, { message, name });
+        }
       }
     }
   }
@@ -87,37 +111,61 @@ async function messageToText(message) {
   }
 }
 
-async function processMessage(message, name) {
-  if (!db.markProcessed(message.id)) return;
-
-  markAsRead(message.id).catch(() => {});
-
-  const isAdvisor = config.advisorPhone && message.from === config.advisorPhone;
-  if (isAdvisor) {
+async function processAdvisor(message, name) {
+  try {
+    markAsRead(message.id).catch(() => {});
     const buttonId = message.interactive?.button_reply?.id || message.button?.payload || null;
     const text = message.type === 'text'
       ? (message.text?.body ?? '')
       : (message.interactive?.button_reply?.title ?? message.button?.text ?? '');
     if (await tryHandleOperatorInbound({ buttonId, text, interactive: message.interactive, button: message.button })) {
+      db.markProcessed(message.id);
       return;
     }
-    if (message.type === 'text' && await handleAdvisorCommand(message.text.body)) return;
+    if (message.type === 'text' && await handleAdvisorCommand(message.text.body)) {
+      db.markProcessed(message.id);
+      return;
+    }
+    await processBatch(message.from, [{ message, name }]);
+  } catch (err) {
+    console.error(`[${message.from}]`, err);
   }
+}
 
-  const text = await messageToText(message);
-  if (!text) return;
+async function processBatch(phone, items) {
+  const fresh = items.filter((item) => usableId(item.message?.id) && !db.isDuplicateEvent(item.message.id));
+  if (!fresh.length) return;
 
-  const phone = message.from;
-  const result = await handleCustomerMessage({ phone, name, text });
-
-  if (result.reply) await sendText(phone, result.reply);
+  try {
+    markAsRead(fresh.at(-1).message.id).catch(() => {});
+    const texts = [];
+    for (const item of fresh) {
+      const text = await messageToText(item.message);
+      if (text) texts.push(text);
+    }
+    if (!texts.length) {
+      fresh.forEach((item) => db.markProcessed(item.message.id));
+      return;
+    }
+    const name = [...fresh].reverse().map((item) => item.name).find(Boolean);
+    const result = await handleCustomerMessage({
+      phone,
+      name,
+      text: texts.join('\n'),
+      wamid: fresh[0].message.id,
+    });
+    await completeCustomerTurn(phone, result);
+    fresh.forEach((item) => db.markProcessed(item.message.id));
+  } catch (err) {
+    console.error(`[${phone}] No se completó el turno; Meta puede reintentarlo:`, err.message ?? err);
+  }
 }
 
 app.listen(config.port, () => {
-  console.log(`Bárbara escuchando en http://localhost:${config.port}`);
+  console.log(`Bárbara (Cloud API ${config.whatsapp.apiVersion}) en http://localhost:${config.port}`);
   console.log(`Webhook: http://localhost:${config.port}/webhook`);
-  const catalog = getCatalogInfo();
+  const catalog = warnIfDemoCatalog();
   console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
   getBcvRate().then((bcv) => console.log(bcv ? `Tasa BCV: ${bcv.rate} Bs/USD (${bcv.date})` : 'Tasa BCV no disponible'));
-  if (!config.advisorPhone) console.warn('ADVISOR_PHONE no configurado: no se enviarán avisos de escalado.');
+  if (!config.advisorPhone) console.warn('ADVISOR_PHONE no configurado: los avisos de escalado quedan en el CRM.');
 });

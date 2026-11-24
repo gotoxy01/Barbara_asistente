@@ -55,6 +55,22 @@ addColumnIfMissing('orders', 'boleta_pendiente', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('orders', 'kitchen_status', "TEXT NOT NULL DEFAULT 'nuevo'");
 // Oculto del tablero CRM (p. ej. cancelados que el encargado borró).
 addColumnIfMissing('orders', 'board_hidden', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('chats', 'status', "TEXT NOT NULL DEFAULT 'BOT'");
+addColumnIfMissing('chats', 'last_user_message_at', 'INTEGER');
+addColumnIfMissing('messages', 'wamid', 'TEXT');
+
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_wamid ON messages(wamid) WHERE wamid IS NOT NULL;
+  UPDATE chats
+    SET status = 'SPECIALIST'
+    WHERE paused = 1 AND paused_until IS NULL AND (status IS NULL OR status = 'BOT');
+  UPDATE chats
+    SET last_user_message_at = (
+      SELECT MAX(created_at) FROM messages
+      WHERE messages.phone = chats.phone AND messages.role = 'user'
+    )
+    WHERE last_user_message_at IS NULL;
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS advisor_alerts (
@@ -76,7 +92,10 @@ const stmts = {
   `),
   getChat: db.prepare('SELECT * FROM chats WHERE phone = ?'),
   setPaused: db.prepare('UPDATE chats SET paused = ?, paused_at = ?, paused_until = ? WHERE phone = ?'),
-  addMessage: db.prepare('INSERT INTO messages (phone, role, content, created_at) VALUES (?, ?, ?, ?)'),
+  setStatus: db.prepare('UPDATE chats SET status = ? WHERE phone = ?'),
+  touchWindow: db.prepare('UPDATE chats SET last_user_message_at = ? WHERE phone = ?'),
+  addMessage: db.prepare('INSERT INTO messages (phone, role, content, created_at, wamid) VALUES (?, ?, ?, ?, ?)'),
+  messageByWamid: db.prepare('SELECT id, role, content, created_at FROM messages WHERE wamid = ?'),
   lastModelAt: db.prepare(`SELECT MAX(created_at) AS t FROM messages WHERE phone = ? AND role = 'model'`),
   history: db.prepare(`
     SELECT role, content FROM (
@@ -95,7 +114,12 @@ const stmts = {
     UPDATE orders SET status = 'cancelado', boleta_pendiente = 0, updated_at = ?
     WHERE status IN ('abierto', 'boleta') AND updated_at < ?
   `),
-  markProcessed: db.prepare('INSERT OR IGNORE INTO processed_events (wa_message_id, created_at) VALUES (?, ?)'),
+  markProcessed: db.prepare(`
+    INSERT INTO processed_events (wa_message_id, created_at) VALUES (?, ?)
+    ON CONFLICT(wa_message_id) DO UPDATE SET created_at = excluded.created_at
+  `),
+  getProcessed: db.prepare('SELECT created_at FROM processed_events WHERE wa_message_id = ?'),
+  deleteProcessed: db.prepare('DELETE FROM processed_events WHERE wa_message_id = ?'),
   activeOrder: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta') ORDER BY id DESC LIMIT 1`),
   activeOrders: db.prepare(`SELECT * FROM orders WHERE status IN ('abierto', 'boleta') ORDER BY id DESC`),
   activeOrdersOf: db.prepare(`SELECT * FROM orders WHERE phone = ? AND status IN ('abierto', 'boleta') ORDER BY id DESC`),
@@ -193,11 +217,26 @@ export function pauseChat(phone, durationMs = null) {
 
 export function resumeChat(phone) {
   stmts.setPaused.run(0, null, null, phone);
+  stmts.setStatus.run('BOT', phone);
 }
 
-export function addMessage(phone, role, content) {
+/** El bot deja de responder hasta que el asesor reanude (o hasta SPECIALIST_AUTO_RESUME_HOURS si es > 0). */
+export function setSpecialist(phone) {
+  const now = Date.now();
+  stmts.setPaused.run(1, now, null, phone);
+  stmts.setStatus.run('SPECIALIST', phone);
+}
+
+/** Abre o renueva la ventana de 24 h de WhatsApp con el último mensaje del cliente. */
+export function touchCustomerWindow(phone, now = Date.now()) {
+  stmts.touchWindow.run(now, phone);
+}
+
+export function addMessage(phone, role, content, wamid = null) {
+  const id = typeof wamid === 'string' && wamid.trim() ? wamid.trim() : null;
+  if (id && stmts.messageByWamid.get(id)) return false;
   const createdAt = Date.now();
-  stmts.addMessage.run(phone, role, content, createdAt);
+  stmts.addMessage.run(phone, role, content, createdAt, id);
   if (content !== '[sin respuesta]') {
     publishCrm({ type: 'message', phone, role, content, createdAt });
   }
@@ -430,8 +469,29 @@ export function getOrderById(id) {
   return parseOrder(stmts.getOrder.get(id));
 }
 
-/** Devuelve true si el mensaje es nuevo; false si Meta lo está reenviando. */
-export function markProcessed(waMessageId) {
-  if (typeof waMessageId !== 'string' || !waMessageId) return true;
-  return stmts.markProcessed.run(waMessageId, Date.now()).changes > 0;
+export const PROCESSED_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function hasInbound(wamid) {
+  if (typeof wamid !== 'string' || !wamid.trim()) return false;
+  return Boolean(stmts.messageByWamid.get(wamid.trim()));
+}
+
+/** true si este wamid ya se atendió con éxito y sigue dentro de las 24 h. Un id vacío nunca cuenta. */
+export function isDuplicateEvent(waMessageId, now = Date.now()) {
+  if (typeof waMessageId !== 'string' || !waMessageId.trim()) return false;
+  const id = waMessageId.trim();
+  const row = stmts.getProcessed.get(id);
+  if (!row) return false;
+  if (now - row.created_at >= PROCESSED_TTL_MS) {
+    stmts.deleteProcessed.run(id);
+    return false;
+  }
+  return true;
+}
+
+/** Marca el wamid como atendido. Un id vacío no se guarda (y devuelve false). */
+export function markProcessed(waMessageId, now = Date.now()) {
+  if (typeof waMessageId !== 'string' || !waMessageId.trim()) return false;
+  stmts.markProcessed.run(waMessageId.trim(), now);
+  return true;
 }

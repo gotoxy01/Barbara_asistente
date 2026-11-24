@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { info, warn } from '../log.js';
-import { sendMessage } from '../messenger.js';
+import { outboundRecord, sendMessage } from '../messenger.js';
 import { getBcvRate } from '../services/bcvService.js';
 import { recordAdvisorMessage } from '../services/chatService.js';
 import {
@@ -36,7 +36,7 @@ function isLocal(req) {
 function auth(req, res, next) {
   if (isLocal(req)) return next();
   const token = req.get('x-crm-token') || req.query.token || '';
-  if (token !== config.crm.token) {
+  if (!config.crm.token || token !== config.crm.token) {
     return res.status(401).json({ error: 'Token inválido. En esta PC use http://127.0.0.1:3847' });
   }
   return next();
@@ -80,10 +80,19 @@ function createApp() {
 
     db.upsertChat(phone, null);
     try {
-      await sendMessage(phone, text);
-      recordAdvisorMessage(phone, text);
-      db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
-      return res.json({ ok: true, pausedMinutes: config.manualPauseMinutes });
+      const sent = await sendMessage(phone, text);
+      const stored = outboundRecord(sent, text);
+      recordAdvisorMessage(phone, stored);
+      const specialist = db.getChat(phone)?.status === 'SPECIALIST';
+      if (!specialist) db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
+      return res.json({
+        ok: true,
+        mode: sent?.mode || 'text',
+        pausedMinutes: specialist ? null : config.manualPauseMinutes,
+        notice: sent?.mode === 'template'
+          ? 'La ventana de 24 h está cerrada: se envió la plantilla aprobada en lugar del texto libre.'
+          : null,
+      });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}. ¿WhatsApp ya está conectado?` });
     }
@@ -222,10 +231,10 @@ function createApp() {
     const result = applyWeighedPrice(phone, usd, await getBcvRate());
     if (result.error) return res.status(400).json({ error: result.error });
     try {
-      await sendMessage(phone, result.message);
-      db.addMessage(phone, 'model', result.message);
+      const sent = await sendMessage(phone, result.message);
+      db.addMessage(phone, 'model', outboundRecord(sent, result.message));
       db.resolveAlertsByPhoneKind(phone, 'weigh');
-      return res.json({ ok: true, message: result.message });
+      return res.json({ ok: true, message: result.message, mode: sent?.mode || 'text' });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });
     }
@@ -238,10 +247,10 @@ function createApp() {
     const result = applyNotAvailable(phone, await getBcvRate());
     if (result.error) return res.status(400).json({ error: result.error });
     try {
-      await sendMessage(phone, result.message);
-      db.addMessage(phone, 'model', result.message);
+      const sent = await sendMessage(phone, result.message);
+      db.addMessage(phone, 'model', outboundRecord(sent, result.message));
       db.resolveAlertsByPhoneKind(phone, 'weigh');
-      return res.json({ ok: true, message: result.message });
+      return res.json({ ok: true, message: result.message, mode: sent?.mode || 'text' });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });
     }
