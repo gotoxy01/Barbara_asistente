@@ -49,6 +49,17 @@ describe('umbral de confianza y escalado', () => {
     assert.equal(decision.escalate, false);
   });
 
+  it('escala si la búsqueda híbrida queda por debajo del umbral', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 99,
+      retrievalScore: 0.4,
+      customerText: 'hay harina?',
+    });
+    assert.equal(decision.escalate, true);
+    assert.match(decision.reason, /búsqueda/);
+  });
+
   it('no pisa una boleta ya calculada por el sistema', () => {
     const decision = decideEscalation({ ...base, confianza: 10, cartCommitted: true, customerText: 'es todo' });
     assert.equal(decision.escalate, false);

@@ -79,6 +79,16 @@ export const config = {
   orderMemoryHours: Number(process.env.ORDER_MEMORY_HOURS || 24),
   timezone: process.env.TIMEZONE || 'America/Caracas',
   dbPath: process.env.DB_PATH || 'barbara.db',
+  databaseUrl: process.env.DATABASE_URL || '',
+  redisUrl: process.env.REDIS_URL || '',
+  embedding: {
+    model: process.env.EMBEDDING_MODEL || 'gemini-embedding-001',
+    dimensions: Number(process.env.EMBEDDING_DIMENSIONS || 768),
+  },
+  hybrid: {
+    keywordWeight: Number(process.env.HYBRID_KEYWORD_WEIGHT || 0.55),
+    vectorWeight: Number(process.env.HYBRID_VECTOR_WEIGHT || 0.45),
+  },
   delivery: {
     // Artículo del sistema de caja cuyo precio es el costo del delivery (uno por pedido)
     itemName: process.env.DELIVERY_ITEM_NAME || 'Delivery costo',
@@ -124,6 +134,10 @@ export function assertGeminiConfig() {
 }
 
 /** Datos del negocio que no pueden quedar escritos en el código. */
+export function assertDatabaseConfig() {
+  required('DATABASE_URL');
+}
+
 export function assertBusinessConfig() {
   required('PAGO_MOVIL_TELEFONO');
   required('PAGO_MOVIL_CEDULA');

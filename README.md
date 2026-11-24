@@ -1,6 +1,6 @@
 # Bárbara – Abasto Los Cuchos
 
-Asistente de WhatsApp de la bodega. El canal principal es la **WhatsApp Cloud API oficial** de Meta. Responde con Google Gemini, busca precios en el catálogo local, arma la boleta en código (no se la inventa el modelo) y guarda el historial en SQLite (`barbara.db`).
+Asistente de WhatsApp de la bodega. El canal principal es la **WhatsApp Cloud API oficial** de Meta. Responde con Google Gemini, consulta precios en PostgreSQL local al momento de responder y arma la boleta en código (no se la inventa el modelo).
 
 El modo con código QR (`whatsapp-web.js`) queda como respaldo.
 
@@ -14,9 +14,19 @@ copy .env.example .env
 Complete `.env`. Estas variables son obligatorias:
 
 - Cloud: `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_TEMPLATE_NAME`
-- Siempre: `GEMINI_API_KEY`, `PAGO_MOVIL_TELEFONO`, `PAGO_MOVIL_CEDULA`, `PAGO_MOVIL_BANCO`, `CRM_TOKEN`
+- Siempre: `DATABASE_URL`, `GEMINI_API_KEY`, `PAGO_MOVIL_TELEFONO`, `PAGO_MOVIL_CEDULA`, `PAGO_MOVIL_BANCO`, `CRM_TOKEN`
 
 Sin ellas el proceso no arranca. No escriba teléfonos, cédulas ni tokens en el código.
+
+## 1b. En la PC de la tienda
+
+La base es **PostgreSQL instalado en esa PC**, con pgvector. Los datos del negocio no van a Supabase. El paso a paso (Postgres, túnel de Cloudflare, servicio de Windows y Redis opcional) está en [docs/instalacion-windows.md](docs/instalacion-windows.md).
+
+Si venía de `barbara.db`:
+
+```powershell
+npm run migrate:sqlite
+```
 
 ## 2. WhatsApp Cloud API
 
@@ -73,6 +83,6 @@ npm test
 
 `npm run start:qr` abre WhatsApp Web. No es la API oficial: el teléfono del negocio debe quedar vinculado y la PC encendida. Úselo si Cloud todavía no está listo. El panel y el catálogo funcionan igual. La ventana de 24 horas y las plantillas aplican al canal Cloud.
 
-## 6. Lo que esta fase no incluye
+## 6. Lo que falta
 
-Postgres con `pgvector`, Redis/BullMQ, visión de fotos, recontacto automático del tipo “déjame lo pienso” y un CRM con etiquetas y embudo quedan para fases siguientes. La cola actual tiene la misma forma (`push` por cliente) para poder cambiarla por Redis sin reescribir el webhook.
+Visión de fotos, el recontacto automático del tipo “déjame lo pienso” y un CRM con etiquetas y embudo. Postgres local y la cola Redis opcional ya están.

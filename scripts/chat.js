@@ -2,13 +2,17 @@
 // Uso: npm run chat   (escriba "salir" para terminar, "reanudar" si el chat quedó escalado)
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { assertBusinessConfig, assertGeminiConfig } from '../src/config.js';
-import { addMessage, resumeChat } from '../src/db.js';
+import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig } from '../src/config.js';
+import { addMessage, initDb, resumeChat } from '../src/db.js';
+import { syncCatalog } from '../src/services/productSync.js';
 import { getCatalogInfo } from '../src/services/catalogService.js';
 import { finalizeHandoff, handleCustomerMessage } from '../src/services/chatService.js';
 
 assertGeminiConfig();
 assertBusinessConfig();
+assertDatabaseConfig();
+await initDb();
+await syncCatalog();
 
 const phone = process.env.TEST_PHONE || '580000000000';
 const name = process.env.TEST_NAME || 'Cliente de Prueba';
@@ -25,7 +29,7 @@ while (true) {
   if (!text) continue;
   if (text.toLowerCase() === 'salir') break;
   if (text.toLowerCase() === 'reanudar') {
-    resumeChat(phone);
+    await resumeChat(phone);
     console.log('(Bárbara reactivada)\n');
     continue;
   }
@@ -40,7 +44,7 @@ while (true) {
   }
   if (result.reply) {
     console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
-    addMessage(phone, 'model', result.historyText || result.reply);
+    await addMessage(phone, 'model', result.historyText || result.reply);
   }
   if (result.escalated && result.handoff) {
     await finalizeHandoff({ phone, name, handoff: result.handoff, notify: printNotice });

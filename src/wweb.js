@@ -1,16 +1,18 @@
 // Bárbara conectada a WhatsApp escaneando un código QR con el teléfono del negocio (whatsapp-web.js).
-// Uso: npm start
+// Uso: npm run start:qr
 import fs from 'node:fs';
 import path from 'node:path';
 import qrcode from 'qrcode-terminal';
 import wweb from 'whatsapp-web.js';
-import { assertBusinessConfig, assertGeminiConfig, config } from './config.js';
+import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig, config } from './config.js';
 import * as db from './db.js';
+import { initDb } from './db.js';
 import { setChannel, setSelfPhone, setSender } from './messenger.js';
-import { createInboundQueue, enqueue } from './queue.js';
+import { enqueue, openInboundQueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
 import { warnIfDemoCatalog } from './services/catalogService.js';
+import { startCatalogSync } from './services/productSync.js';
 import { startCrmServer } from './crm/server.js';
 import { info, verbose, warn } from './log.js';
 import { completeCustomerTurn, handleCustomerMessage, recordAdvisorMessage, startResumeLoop } from './services/chatService.js';
@@ -21,6 +23,9 @@ const { Client, LocalAuth } = wweb;
 
 assertGeminiConfig();
 assertBusinessConfig();
+assertDatabaseConfig();
+await initDb();
+startCatalogSync();
 migrateLegacySession();
 
 // El buzón CRM abre de una vez (no espera a que WhatsApp termine de conectar).
@@ -172,7 +177,7 @@ async function getChatSafe(phone, chatId) {
 setChannel('wweb');
 setSender((phone, text) => sendToPhone(phone, text));
 
-const inbound = createInboundQueue({
+const inbound = await openInboundQueue({
   windowMs: config.debounceWindowMs,
   onFlush: (phone, items) => processCustomerBatch(phone, items),
 });
@@ -230,11 +235,11 @@ async function processAdvisorMessage(msg, phone, id) {
   try {
     const buttonId = msg.selectedButtonId || msg._data?.selectedButtonId || null;
     if (await tryHandleOperatorInbound({ buttonId, text: msg.body, body: msg.body })) {
-      db.markProcessed(id);
+      await db.markProcessed(id);
       return;
     }
     if (msg.type === 'chat' && await handleAdvisorCommand(msg.body, { quotedBody: await quotedBodyOf(msg) })) {
-      db.markProcessed(id);
+      await db.markProcessed(id);
       return;
     }
     await processCustomerBatch(phone, [{ id, msg, phone, chatId: msg.from }]);
@@ -244,7 +249,10 @@ async function processAdvisorMessage(msg, phone, id) {
 }
 
 async function processCustomerBatch(phone, items) {
-  const fresh = items.filter((item) => item.id && !db.isDuplicateEvent(item.id));
+  const fresh = [];
+  for (const item of items) {
+    if (item.id && !await db.isDuplicateEvent(item.id)) fresh.push(item);
+  }
   if (!fresh.length) return;
   const last = fresh.at(-1);
   const chat = await getChatSafe(phone, last.chatId);
@@ -263,7 +271,7 @@ async function processCustomerBatch(phone, items) {
         || name;
     }
     if (!texts.length) {
-      fresh.forEach((item) => db.markProcessed(item.id));
+      for (const item of fresh) await db.markProcessed(item.id);
       return;
     }
     chat?.sendStateTyping().catch(() => {});
@@ -274,7 +282,7 @@ async function processCustomerBatch(phone, items) {
     await completeCustomerTurn(phone, result);
     if (result.paused && !result.reply) verbose(`[${phone}] Chat pausado: Bárbara no responde.`);
     if (result.reply) verbose(`[${phone}] Bárbara respondió${result.model ? ` (${result.model})` : ''}.`);
-    fresh.forEach((item) => db.markProcessed(item.id));
+    for (const item of fresh) await db.markProcessed(item.id);
   } catch (err) {
     console.error(`[${phone}] No se completó el turno:`, err.message ?? err);
   } finally {
@@ -301,7 +309,7 @@ async function handleGroupMessage(msg) {
     console.warn('Mensaje de grupo sin id; omitido');
     return;
   }
-  if (db.isDuplicateEvent(id)) return;
+  if (await db.isDuplicateEvent(id)) return;
   inbound.push(phone, { id, msg, phone, chatId: author, groupName });
 }
 
@@ -320,7 +328,7 @@ client.on('message', async (msg) => {
     console.warn('Mensaje sin id; omitido');
     return;
   }
-  if (db.isDuplicateEvent(id)) return;
+  if (await db.isDuplicateEvent(id)) return;
   if (config.advisorPhone && phone === config.advisorPhone) {
     enqueue(phone, () => processAdvisorMessage(msg, phone, id));
     return;
@@ -374,9 +382,9 @@ client.on('message_create', async (msg) => {
   // (cada mensaje manual reinicia el contador) y luego se reactiva sola.
   chatIdByPhone.set(phone, msg.to);
   enqueue(phone, async () => {
-    const wasPaused = db.getChat(phone)?.paused === 1;
-    recordAdvisorMessage(phone, msg.body);
-    db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
+    const wasPaused = await db.getChat(phone)?.paused === 1;
+    await recordAdvisorMessage(phone, msg.body);
+    await db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
     if (!wasPaused) {
       info(`[${phone}] Respuesta manual: Bárbara pausada ${config.manualPauseMinutes} min.`);
     }

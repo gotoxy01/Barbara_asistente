@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { config } from '../config.js';
-import { toBolivares } from './bcvService.js';
+import * as db from '../db.js';
+import { rankHybrid } from '../search/hybrid.js';
+import { embedText } from './embeddings.js';
+import { formatCatalogLine } from './priceTools.js';
 
 /**
  * @typedef {{ nombre: string, presentacion: string, precio: number, categoria: string,
@@ -296,12 +299,27 @@ function splitPresentation(rawName, fallback) {
   return { nombre: nombre || rawName, presentacion: found.map((s) => s.trim()).join(' ') };
 }
 
-function buildProduct({ nombre, presentacion, precio, categoria, marca = '' }) {
+export function makeSku(parts) {
+  return parts
+    .filter(Boolean)
+    .join(' ')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64);
+}
+
+function buildProduct({ nombre, presentacion, precio, categoria, marca = '', sku = '', stock = null }) {
+  const label = presentacion || 'unidad';
   return {
     nombre,
-    presentacion: presentacion || 'unidad',
+    presentacion: label,
     precio: Number(precio),
     categoria,
+    stock: stock == null || stock === '' ? null : Number(stock),
+    sku: sku || makeSku([categoria, nombre, label]),
     nameTokens: nameTokens(`${nombre} ${marca}`),
     extraTokens: tokenize(`${categoria} ${presentacion}`),
   };
@@ -309,7 +327,7 @@ function buildProduct({ nombre, presentacion, precio, categoria, marca = '' }) {
 
 const DB_SOURCES = [
   { table: 'articulos', categoria: 'Víveres / Limpieza / Ferretería', fallback: 'unidad',
-    sql: 'SELECT articulo AS nombre, precio FROM articulos WHERE precio > 0 AND (stock IS NULL OR stock > 0)' },
+    sql: 'SELECT articulo AS nombre, precio, stock FROM articulos WHERE precio > 0 AND (stock IS NULL OR stock > 0)' },
   { table: 'charcuteria_rapida', categoria: 'Charcutería', fallback: 'por kilo',
     sql: 'SELECT nombre, precio FROM charcuteria_rapida WHERE precio > 0' },
   { table: 'verduras_rapidas', categoria: 'Verduras y frutas', fallback: 'por kilo',
@@ -343,7 +361,9 @@ function loadFromDatabase(path) {
           ? splitPresentation(raw, src.fallback)
           : { nombre: raw, presentacion: src.fallback };
 
-        products.push(buildProduct({ nombre, presentacion, precio: row.precio, categoria: src.categoria }));
+        products.push(buildProduct({
+          nombre, presentacion, precio: row.precio, categoria: src.categoria, stock: row.stock,
+        }));
       }
     }
     if (tables.has('articulos')) {
@@ -380,6 +400,30 @@ function resolveSource() {
 let cache = { products: [], deliveryUsd: null, loadedAt: 0, source: null };
 
 /** Catálogo en memoria, releído de la fuente cada CATALOG_REFRESH_MINUTES. */
+/** Catálogo de la caja o del JSON, antes de guardarlo en products_kb. */
+export function readSourceCatalog() {
+  const source = resolveSource();
+  const loaded = source.type === 'db' ? loadFromDatabase(source.path) : loadFromJson(source.path);
+  return { ...loaded, label: `${source.type}: ${source.path}` };
+}
+
+/** Reemplaza la caché con lo que ya está en Postgres (sin volver a leer precios al prompt). */
+export function replaceProductCache(products, { deliveryUsd = null, source = 'products_kb' } = {}) {
+  cache = {
+    products: products.map((product) => buildProduct({
+      nombre: product.nombre,
+      presentacion: product.presentacion,
+      precio: product.precio,
+      categoria: product.categoria,
+      sku: product.sku,
+      stock: product.stock,
+    })),
+    deliveryUsd,
+    loadedAt: Date.now(),
+    source: { type: 'postgres', path: source },
+  };
+}
+
 export function getProducts() {
   const maxAge = config.catalog.refreshMinutes * 60 * 1000;
   if (!cache.products.length || Date.now() - cache.loadedAt > maxAge) {
@@ -468,16 +512,12 @@ function scoreProduct(product, terms) {
  * @param {Product} p
  * @param {import('./bcvService.js').BcvRate|null} bcv
  */
-function formatProduct(p, bcv) {
-  const usd = `$ ${p.precio.toFixed(2)} USD`;
-  if (!bcv) return `- ${p.nombre} (${p.presentacion}): ${usd}`;
-  return `- ${p.nombre} (${p.presentacion}): Bs. ${toBolivares(p.precio, bcv.rate).toFixed(2)} (o ${usd})`;
+function formatProduct(product) {
+  return formatCatalogLine(product);
 }
 
-function rateLine(bcv) {
-  return bcv
-    ? `TASA BCV DEL DÍA: Bs. ${bcv.rate.toFixed(2)} por USD (fecha: ${bcv.date}).`
-    : 'TASA BCV: no disponible en este momento. Indique los precios en USD y que el monto en Bs. se calcula a la Tasa BCV del día al pagar.';
+function rateLine() {
+  return 'PRECIOS Y STOCK: este bloque no trae montos. Para cada sku use get_price y get_stock. Copie el resultado de la herramienta; no calcule ni invente precios.';
 }
 
 function rankProducts(query, products) {
@@ -570,7 +610,59 @@ export function findProduct(query) {
  * @param {{ bcv?: import('./bcvService.js').BcvRate|null }} [options]
  * @returns {{ type: 'matches'|'none', terms: string[], products: Product[], text: string }}
  */
-export function searchProducts(queries, { bcv = null } = {}) {
+const embedCache = new Map();
+
+async function retrievalFor(result, queryText) {
+  const products = getProducts();
+  const keywordHits = (result.products || []).map((product, index, list) => ({
+    sku: product.sku,
+    keyword: list.length - index,
+  }));
+  let vectorHits = [];
+  const text = String(queryText || '').trim();
+  if (text && config.gemini.apiKey) {
+    try {
+      let vector = embedCache.get(text);
+      if (!vector) {
+        vector = await embedText(text);
+        if (vector) {
+          embedCache.set(text, vector);
+          if (embedCache.size > 40) embedCache.delete(embedCache.keys().next().value);
+        }
+      }
+      if (vector) vectorHits = await db.searchByVector(vector, 20);
+    } catch {
+      vectorHits = [];
+    }
+  }
+  const ranked = rankHybrid(keywordHits, vectorHits, {
+    keywordWeight: config.hybrid.keywordWeight,
+    vectorWeight: config.hybrid.vectorWeight,
+  });
+  const score = ranked[0]?.score ?? (result.type === 'matches' ? 0.55 : 0);
+  if (result.type === 'none' && ranked[0]?.score >= 0.45) {
+    const extra = ranked.slice(0, 5)
+      .map((hit) => products.find((product) => product.sku === hit.sku))
+      .filter((product) => product && product.categoria !== 'politica' && product.sku !== 'servicio-delivery');
+    if (extra.length) {
+      return {
+        type: 'matches',
+        terms: result.terms,
+        products: extra,
+        soft: true,
+        retrievalScore: ranked[0].score,
+        text: [
+          rateLine(),
+          'PRODUCTOS ENCONTRADOS por parecido (sin precios; use get_price con el sku):',
+          ...extra.map((product) => formatProduct(product)),
+        ].join('\n'),
+      };
+    }
+  }
+  return { ...result, retrievalScore: score };
+}
+
+export async function searchProducts(queries, { bcv = null } = {}) {
   const products = getProducts();
   const results = (Array.isArray(queries) ? queries : [queries])
     .filter((q) => q && q.trim())
@@ -580,7 +672,7 @@ export function searchProducts(queries, { bcv = null } = {}) {
   const terms = [...new Set(results.flatMap((r) => r.terms))];
   const found = results.filter((r) => r.matches.length);
   const missingWords = [...new Set(results.flatMap((r) => r.missing))];
-  const lines = [rateLine(bcv)];
+  const lines = [rateLine()];
 
   if (found.length) {
     const shown = new Set();
@@ -589,7 +681,7 @@ export function searchProducts(queries, { bcv = null } = {}) {
       const fresh = r.matches.filter((p) => !shown.has(p));
       fresh.forEach((p) => shown.add(p));
       if (found.length > 1) lines.push(`Para "${r.terms.join(' ')}":`);
-      lines.push(...fresh.map((p) => formatProduct(p, bcv)));
+      lines.push(...fresh.map((p) => formatProduct(p)));
     }
     if (missingWords.length) {
       lines.push(
@@ -598,8 +690,7 @@ export function searchProducts(queries, { bcv = null } = {}) {
         'salvo que uno de los PRODUCTOS ENCONTRADOS sea claramente lo que quiso decir escrito de otra forma (ofrécele ese).',
       );
     }
-    lines.push(BCV_NOTE);
-    return { type: 'matches', terms, products: [...shown], text: lines.join('\n') };
+    return retrievalFor({ type: 'matches', terms, products: [...shown], text: lines.join('\n') }, terms.join(' '));
   }
 
   if (!terms.length) {
@@ -612,15 +703,14 @@ export function searchProducts(queries, { bcv = null } = {}) {
     lines.push(
       `PRODUCTOS ENCONTRADOS: Ninguno con el nombre exacto "${terms.join(' ')}".`,
       'SUGERENCIAS CERCANAS (el cliente pudo escribir mal el nombre o usar otro nombre del mismo producto):',
-      ...soft.map((p) => formatProduct(p, bcv)),
-      'Ofrezca estas opciones como lo más parecido, con su nombre correcto del catálogo, sin regañar al cliente por la escritura. Si ninguna encaja con lo que pidió, diga que no hay disponible.',
-      BCV_NOTE,
+      ...soft.map((p) => formatProduct(p)),
+      'Ofrezca estas opciones como lo más parecido, con su nombre correcto del catálogo, sin regañar al cliente por la escritura. El precio sale de get_price, no de este bloque. Si ninguna encaja con lo que pidió, diga que no hay disponible.',
     );
-    return { type: 'matches', terms, products: soft, text: lines.join('\n'), soft: true };
+    return retrievalFor({ type: 'matches', terms, products: soft, text: lines.join('\n'), soft: true }, terms.join(' '));
   }
 
   lines.push(
     `PRODUCTOS ENCONTRADOS: Ninguno. (El producto no está en el catálogo). Búsqueda realizada: "${terms.join(' ')}".`,
   );
-  return { type: 'none', terms, products: [], text: lines.join('\n') };
+  return retrievalFor({ type: 'none', terms, products: [], text: lines.join('\n') }, terms.join(' '));
 }

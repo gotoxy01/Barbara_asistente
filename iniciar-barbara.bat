@@ -12,7 +12,10 @@ echo.
 echo  ==================================================
 echo.
 echo  Carpeta: %cd%
-echo  Modo: WhatsApp Cloud API  ^(npm start^)
+echo  Modo: WhatsApp Cloud API en esta PC
+echo  Hace falta PostgreSQL local y DATABASE_URL en .env
+echo  El tunel (cloudflared) debe apuntar a http://127.0.0.1:3000
+echo  Para dejarla siempre encendida use NSSM o: npx pm2 start src/server.js --name barbara
 echo  Respaldo con codigo QR: npm run start:qr
 echo  Para detener a Bárbara presione Ctrl+C.
 echo.

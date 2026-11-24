@@ -148,7 +148,7 @@ export async function solicitarAprobacionRapida({
   });
 
   try {
-    db.addAdvisorAlert({
+    await db.addAdvisorAlert({
       kind: motivo === 'pago' ? 'payment' : motivo === 'flete' ? 'order' : 'weigh',
       phone,
       title: `Nota ${ticket.ticketId}`,
@@ -200,9 +200,9 @@ async function replyOperator(text) {
 
 async function sendToCustomer(ticket, text) {
   const sent = await sendMessage(ticket.clienteTelefono, text);
-  db.addMessage(ticket.clienteTelefono, 'model', outboundRecord(sent, text));
-  db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'weigh');
-  db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'ticket');
+  await db.addMessage(ticket.clienteTelefono, 'model', outboundRecord(sent, text));
+  await db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'weigh');
+  await db.resolveAlertsByPhoneKind(ticket.clienteTelefono, 'ticket');
 }
 
 async function closeTicket(ticketId, patch = {}) {
@@ -212,7 +212,7 @@ async function closeTicket(ticketId, patch = {}) {
 
 async function handleApprove(ticket) {
   // En caja (pesaje/consulta) el cliente ya recibió el “espere…”: hace falta el precio.
-  const pending = pendingWeighItems(db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
+  const pending = pendingWeighItems(await db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
   if ((ticket.motivo === 'caja' || pending.length) && pending.length) {
     updateTicket(ticket.ticketId, { estado: 'ESPERANDO_EDICION' });
     setEditingTicket(ticket.ticketId);
@@ -236,10 +236,10 @@ async function handleNoStock(ticket) {
   await closeTicket(ticket.ticketId);
 
   // Si hay pesaje/consulta pendiente, reutiliza el flujo de caja.
-  const pending = pendingWeighItems(db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
+  const pending = pendingWeighItems(await db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
   if (pending.length) {
     const bcv = await getBcvRate();
-    const result = applyNotAvailable(ticket.clienteTelefono, bcv, { ticketItems: ticket.items });
+    const result = await applyNotAvailable(ticket.clienteTelefono, bcv, { ticketItems: ticket.items });
     if (!result.error) {
       await sendToCustomer(ticket, result.message);
       await replyOperator(`❌ Notificado sin stock a ${labelCliente(ticket)}`);
@@ -248,7 +248,7 @@ async function handleNoStock(ticket) {
   }
 
   const bcv = await getBcvRate();
-  const catalog = searchProducts(
+  const catalog = await searchProducts(
     ticket.items.map((i) => i.nombre || i.detalle || '').filter(Boolean).join(' ') || ticket.borradorRespuesta,
     { bcv },
   );
@@ -274,12 +274,12 @@ async function handleEdit(ticket) {
 async function handleEditText(ticket, operatorText) {
   const usd = Number(String(operatorText).replace(',', '.').match(/(\d+(?:\.\d{1,2})?)/)?.[1]);
   const looksLikePriceOnly = /^\s*\$?\s*\d+(?:[.,]\d{1,2})?\s*\$?\s*$/.test(operatorText)
-    && pendingWeighItems(db.getActiveOrder(ticket.clienteTelefono)?.items ?? []).length;
+    && pendingWeighItems((await db.getActiveOrder(ticket.clienteTelefono))?.items ?? []).length;
 
   let mensaje;
   if (looksLikePriceOnly && usd > 0) {
     const { applyWeighedPrice } = await import('./orderService.js');
-    const result = applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate(), {
+    const result = await applyWeighedPrice(ticket.clienteTelefono, usd, await getBcvRate(), {
       ticketItems: ticket.items,
     });
     if (result.error) {
@@ -289,7 +289,7 @@ async function handleEditText(ticket, operatorText) {
     mensaje = result.message;
   } else {
     const bcv = await getBcvRate();
-    const catalog = searchProducts(operatorText, { bcv });
+    const catalog = await searchProducts(operatorText, { bcv });
     mensaje = await draftFromOperatorInstruction({
       instruccion: operatorText,
       ticket,

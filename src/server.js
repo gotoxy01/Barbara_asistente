@@ -1,15 +1,17 @@
 // Bárbara en la WhatsApp Cloud API oficial de Meta (canal principal).
 // Uso: npm start
 import express from 'express';
-import { assertBusinessConfig, assertGeminiConfig, assertWhatsAppConfig, config } from './config.js';
+import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig, assertWhatsAppConfig, config } from './config.js';
 import { startCrmServer } from './crm/server.js';
 import * as db from './db.js';
+import { initDb } from './db.js';
 import { warn } from './log.js';
 import { setChannel, setInteractiveSender, setSender } from './messenger.js';
-import { createInboundQueue, enqueue } from './queue.js';
+import { enqueue, openInboundQueue } from './queue.js';
 import { handleAdvisorCommand } from './services/advisorCommands.js';
 import { getBcvRate } from './services/bcvService.js';
 import { warnIfDemoCatalog } from './services/catalogService.js';
+import { startCatalogSync } from './services/productSync.js';
 import { completeCustomerTurn, handleCustomerMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
 import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
@@ -24,14 +26,17 @@ import {
 assertWhatsAppConfig();
 assertGeminiConfig();
 assertBusinessConfig();
+assertDatabaseConfig();
+await initDb();
 setChannel('cloud');
 setSender((phone, text) => sendText(phone, text));
 setInteractiveSender((phone, payload) => sendInteractiveButtons(phone, payload));
 
 startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
+startCatalogSync();
 startResumeLoop();
 
-const inbound = createInboundQueue({
+const inbound = await openInboundQueue({
   windowMs: config.debounceWindowMs,
   onFlush: (phone, items) => processBatch(phone, items),
 });
@@ -56,7 +61,7 @@ function usableId(id) {
   return typeof id === 'string' && id.trim().length > 0;
 }
 
-app.post('/webhook', (req, res) => {
+app.post('/webhook', async (req, res) => {
   if (!isValidSignature(req.rawBody, req.get('x-hub-signature-256'))) {
     console.warn('Firma de webhook ausente o inválida; petición rechazada');
     return res.sendStatus(401);
@@ -74,7 +79,7 @@ app.post('/webhook', (req, res) => {
           console.warn('Webhook sin wamid; mensaje omitido');
           continue;
         }
-        if (db.isDuplicateEvent(message.id)) continue;
+        if (await db.isDuplicateEvent(message.id)) continue;
         const name = contacts.find((c) => c.wa_id === message.from)?.profile?.name;
         if (config.advisorPhone && message.from === config.advisorPhone) {
           enqueue(message.from, () => processAdvisor(message, name));
@@ -119,11 +124,11 @@ async function processAdvisor(message, name) {
       ? (message.text?.body ?? '')
       : (message.interactive?.button_reply?.title ?? message.button?.text ?? '');
     if (await tryHandleOperatorInbound({ buttonId, text, interactive: message.interactive, button: message.button })) {
-      db.markProcessed(message.id);
+      await db.markProcessed(message.id);
       return;
     }
     if (message.type === 'text' && await handleAdvisorCommand(message.text.body)) {
-      db.markProcessed(message.id);
+      await db.markProcessed(message.id);
       return;
     }
     await processBatch(message.from, [{ message, name }]);
@@ -133,7 +138,10 @@ async function processAdvisor(message, name) {
 }
 
 async function processBatch(phone, items) {
-  const fresh = items.filter((item) => usableId(item.message?.id) && !db.isDuplicateEvent(item.message.id));
+  const fresh = [];
+  for (const item of items) {
+    if (usableId(item.message?.id) && !await db.isDuplicateEvent(item.message.id)) fresh.push(item);
+  }
   if (!fresh.length) return;
 
   try {
@@ -144,7 +152,7 @@ async function processBatch(phone, items) {
       if (text) texts.push(text);
     }
     if (!texts.length) {
-      fresh.forEach((item) => db.markProcessed(item.message.id));
+      for (const item of fresh) await db.markProcessed(item.message.id);
       return;
     }
     const name = [...fresh].reverse().map((item) => item.name).find(Boolean);
@@ -155,7 +163,7 @@ async function processBatch(phone, items) {
       wamid: fresh[0].message.id,
     });
     await completeCustomerTurn(phone, result);
-    fresh.forEach((item) => db.markProcessed(item.message.id));
+    for (const item of fresh) await db.markProcessed(item.message.id);
   } catch (err) {
     console.error(`[${phone}] No se completó el turno; Meta puede reintentarlo:`, err.message ?? err);
   }

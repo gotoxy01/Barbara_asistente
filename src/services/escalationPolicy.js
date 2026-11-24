@@ -53,7 +53,11 @@ export function decideEscalation(input = {}) {
     && Array.isArray(input.catalogTerms)
     && input.catalogTerms.length > 0
     && QUOTE_RE.test(text);
-  const low = confianzaNum <= threshold;
+  const retrievalLow = input.retrievalScore != null
+    && Array.isArray(input.catalogTerms)
+    && input.catalogTerms.length > 0
+    && Number(input.retrievalScore) * 100 <= threshold;
+  const low = confianzaNum <= threshold || retrievalLow;
   const modelAsked = input.requiereEspecialista === true;
 
   if (!(human || complaint || wholesale || outOfCatalog || low || modelAsked)) {
@@ -65,6 +69,7 @@ export function decideEscalation(input = {}) {
     || (complaint && 'Queja o reclamo')
     || (wholesale && 'Cotización al mayor')
     || (outOfCatalog && 'Consulta fuera de catálogo')
+    || (retrievalLow && `La búsqueda del catálogo no llegó al ${threshold}%`)
     || (low && `Confianza ${confianzaNum}% ≤ ${threshold}%`)
     || 'El modelo pidió especialista';
 
