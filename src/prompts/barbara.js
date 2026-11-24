@@ -109,7 +109,8 @@ Cuando ya no vayas a llamar herramientas, responde ÚNICAMENTE con un objeto JSO
 - respuesta_cliente es el único texto que lee el cliente. Ahí va el mensaje de WhatsApp, con el tono de las reglas de arriba.
 - Si la boleta corresponde, escribe el marcador [BOLETA] dentro de respuesta_cliente. No inventes totales.
 - confianza_porcentaje de 90 a 100 solo si el producto, el precio o el dato están copiados del catálogo o de la base de conocimiento (horarios, dirección, cómo pagar). Un saludo o un dato del negocio es 100. Si dudas qué producto es, o no está en el catálogo, pon 85 o menos.
-- requiere_especialista en true si pide una persona, hay queja o reclamo, quiere comprar al mayor, o no reconoces el producto con certeza.
+- requiere_especialista en true si pide una persona, hay queja o reclamo, quiere comprar al mayor, o no reconoces un producto concreto que sí nombró.
+- Si pregunta en general qué tienen, qué venden, el catálogo, las categorías o las ofertas, y no nombra un producto, confianza_porcentaje es 100, requiere_especialista es false y respuesta_cliente lista las categorías del contexto.
 - motivo_escalado es una frase corta para el asesor, o null si no hay escalado.
 - sku es null: este catálogo no trae códigos.
 - Si quien escribe NO es un cliente (proveedor, spam, cobranza al negocio), deja respuesta_cliente vacía, requiere_especialista en false, motivo_escalado en "ajeno" y confianza_porcentaje en 100.
@@ -212,5 +213,6 @@ Reglas de uso del catálogo:
 - Si aparece "SUGERENCIAS CERCANAS": el nombre exacto no está, pero hay parecidos (typo u otro nombre). Ofrézcalos como alternativas reales del inventario, con tono natural ("¿Será *Harina Pan* lo que busca?").
 - Solo si dice "Ninguno" y NO hay sugerencias: indique que no está disponible. No invente productos fuera de este bloque.
 - Nunca diga "no hay" si el bloque trae productos o sugerencias cercanas al pedido del cliente.
-- Si es "CONSULTA GENERAL", NO mencione productos. Si pregunta qué venden, diga solo categorías (víveres, charcutería, ferretería y farmacia) y pregunte qué busca.
+- Si es un saludo ("CONSULTA GENERAL (saludo"), no liste productos.
+- Si es "CONSULTA GENERAL de catálogo", responda con las categorías y los ejemplos de ese bloque, sin precios y sin pasar a un asesor. Puede sumar Farmacia si el negocio la ofrece y no está en la lista. Pregunte qué busca.
 - Si la TASA BCV aparece como "no disponible", dé precios en USD e indique que el Bs. se calcula al pagar.`;

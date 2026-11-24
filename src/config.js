@@ -51,6 +51,8 @@ export const config = {
     stableModels: (process.env.GEMINI_STABLE_MODELS || 'gemini-3.5-flash,gemini-flash-latest')
       .split(',').map((name) => name.trim()).filter(Boolean),
     timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 12000),
+    // Tope de la respuesta. El razonamiento largo de Gemini 3 se recorta aparte (thinking mínimo).
+    maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 512),
   },
   // Segunda pasada: revisa precios/cálculos del borrador antes de WhatsApp. AUDITOR_ENABLED=false para desactivar.
   auditor: {

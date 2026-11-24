@@ -4,10 +4,10 @@ import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
-import { historyForModel, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
+import { historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
-import { searchProducts } from './catalogService.js';
+import { catalogOverviewText, searchProducts } from './catalogService.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
@@ -23,8 +23,7 @@ import {
   renderDeliveryFees,
   renderOrderContext,
   isShortFollowUp,
-  trimHistoryForFreshSession,
-  trimHistorySinceCancel,
+  scopeHistoryForTurn,
   renderWeighWaitMessage,
   weightMentionedFor,
 } from './orderService.js';
@@ -239,7 +238,18 @@ async function buildProductContext(history, bcv, currentText = '') {
       terms: [],
       products: [],
       retrievalScore: null,
+      general: false,
       text: 'CONSULTA GENERAL (saludo o comando): no mencione productos ni diga que no hay.',
+    };
+  }
+  if (isGeneralCatalogAsk(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      general: true,
+      text: catalogOverviewText(),
     };
   }
   const current = substantiveLines(currentText);
@@ -267,8 +277,8 @@ async function buildProductContext(history, bcv, currentText = '') {
   return result;
 }
 
-async function conversationSummary(phone) {
-  return (await db.getHistory(phone))
+function summarizeTurns(history) {
+  return (history || [])
     .slice(-6)
     .map((m) => `${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${cleanMsgContent(m.content)}`)
     .filter((line) => !line.endsWith(':'))
@@ -330,7 +340,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     await resetCustomerOrderSession(phone, { quiet: true });
   }
 
-  const history = historyForModel(await db.getHistory(phone));
+  const history = historyForModel(await db.getHistory(phone, config.historyLimit, config.newConversationHours));
   const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
@@ -351,20 +361,27 @@ async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
 async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
   history = historyForModel(history);
   const turnStarted = Date.now();
+  const timings = [];
+  const closeTimings = () => {
+    if (!timings.some((item) => item.step === 'total')) timings.push({ step: 'total', ms: Date.now() - turnStarted });
+    return timings;
+  };
+  const lap = (step, startedAt) => {
+    const ms = Date.now() - startedAt;
+    timings.push({ step, ms });
+    verbose(`${step}: ${ms} ms`);
+    return Date.now();
+  };
+  let mark = turnStarted;
   const bcv = await getBcvRate();
-  // Tras cancelar se corta el historial; siempre se conservan al menos los últimos 4 msgs del hilo.
-  let scopedHistory = trimHistorySinceCancel(history);
-  if (isNewConversation) {
-    const fresh = trimHistoryForFreshSession(scopedHistory);
-    scopedHistory = scopedHistory.slice(-THREAD_FOLLOW_MSGS);
-    if (fresh.length > scopedHistory.length) scopedHistory = fresh;
-  }
-  if (scopedHistory.length < THREAD_FOLLOW_MSGS && history.length) {
-    scopedHistory = trimHistorySinceCancel(history).slice(-THREAD_FOLLOW_MSGS);
-  }
+  mark = lap('tasa', mark);
+  // Conversación nueva: solo lo escrito después del último silencio largo. No se rellena con la respuesta vieja.
+  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  const lightTurn = isLightTurn(text);
 
   const products = await buildProductContext(scopedHistory, bcv, text);
-  const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
+  mark = lap('catálogo', mark);
+  const productContext = lightTurn ? products.text : `${products.text}\n${renderDeliveryFees(bcv)}`;
   const customerText = customerTextWithThread(scopedHistory, text);
   const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
   const systemPrompt = buildSystemPrompt({
@@ -378,9 +395,9 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let salesMeta = null;
   const pendingBefore = pendingWeighItems((await db.getActiveOrder(phone))?.items ?? []).length;
   try {
-    verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini.`);
-    const result = await generateBarbaraReply(systemPrompt, scopedHistory, tools);
-    verbose(`Gemini respondió en ${Date.now() - turnStarted} ms (${result.model || 'sin modelo'}).`);
+    verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini${lightTurn ? ' (sin herramientas ni auditor)' : ''}.`);
+    const result = await generateBarbaraReply(systemPrompt, scopedHistory, lightTurn ? undefined : tools);
+    mark = lap('Gemini', mark);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
     const decision = decideEscalation({
       confianza: result.confianza ?? 0,
@@ -390,13 +407,14 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       catalogType: products.type,
       catalogTerms: products.terms,
       retrievalScore: products.retrievalScore,
+      generalCatalog: products.general === true,
       threshold: config.confidenceThreshold,
       cartCommitted,
     });
     if ((result.ignore || decision.ignore) && !tools.state.cartChanged && !isGreeting(text)) {
       verbose(`[${phone}] Mensaje ajeno a la bodega: Bárbara no responde.`);
       if (resume) await db.addMessage(phone, 'model', SILENT_MARK);
-      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
+      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools, timings: closeTimings(), summary: summarizeTurns(scopedHistory) };
     }
     if (!decision.escalate && !result.ignore && !decision.ignore && !forcedHandoffReason(text) && pendingBefore === 0) {
       await ensureHandOff(result.text, customerText, tools);
@@ -428,7 +446,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   } catch (error) {
     if (!isGreeting(text)) {
       const failed = await handleAiFailure({ phone, name: displayName, text, error, notify, productContext, resume });
-      return { ...failed, tools };
+      return { ...failed, tools, timings: closeTimings(), summary: summarizeTurns(scopedHistory) };
     }
     logError(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
     reply = greetingReply(text, isNewConversation);
@@ -438,7 +456,9 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     reply = `${RESUME_NOTE}\n\n${reply}`;
   }
 
-  if (reply && !escalated && shouldAuditReply(reply, tools?.state, productContext)) {
+  if (lightTurn) {
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+  } else if (reply && !escalated && shouldAuditReply(reply, tools?.state, productContext)) {
     const orderContext = await renderOrderContext(phone, bcv);
     const audited = await runAuditor({
       phone,
@@ -449,6 +469,9 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       resume,
     });
     if (audited) reply = audited;
+    lap('auditor', mark);
+  } else if (!lightTurn) {
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
   }
 
   return {
@@ -463,6 +486,8 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     sku: salesMeta?.sku ?? null,
     motivo: salesMeta?.motivo ?? null,
     confianza: salesMeta?.confianza ?? null,
+    timings: closeTimings(),
+    summary: summarizeTurns(scopedHistory),
   };
 }
 
@@ -565,7 +590,7 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     sku: outcome.sku || null,
     motivo: outcome.motivo || 'Escalado a especialista',
     confianza: outcome.confianza,
-    summary: await conversationSummary(phone),
+    summary: outcome.summary || '',
   } : null;
 
   return {
@@ -578,6 +603,7 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     toolCalls: outcome.toolCalls,
     model: outcome.model,
     confianza: outcome.confianza ?? null,
+    timings: outcome.timings || [],
   };
 }
 
@@ -744,7 +770,7 @@ async function resumeOneNow(phone) {
     chat = await db.getChat(phone);
   }
 
-  const history = (await db.getHistory(phone)).filter((m) => !FAILURE_REPLY_RE.test(m.content));
+  const history = (await db.getHistory(phone, config.historyLimit, config.newConversationHours)).filter((m) => !FAILURE_REPLY_RE.test(m.content));
   const text = pendingCustomerText(history);
   if (!text.trim()) return;
   const lastReplyAt = await db.getLastModelMessageAt(phone);

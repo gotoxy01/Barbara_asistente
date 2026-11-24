@@ -1,10 +1,13 @@
 // Chat de prueba en consola: conversa con Bárbara sin necesidad de WhatsApp.
-// Uso: npm run chat   (escriba "salir" para terminar, "reanudar" o "#reanudar" si quedó escalado)
+// Uso: npm run chat
+//      npm run chat -- --nuevo   (borra el hilo del cliente de prueba antes de empezar)
+// Escriba "salir" para terminar, "borrar" para limpiar el hilo, "reanudar" o "#reanudar" si quedó escalado.
 import dotenv from 'dotenv';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
 dotenv.config();
+process.env.LOG_VERBOSE = '1';
 
 if (!process.env.PAGO_MOVIL_TELEFONO || !process.env.PAGO_MOVIL_CEDULA || !process.env.PAGO_MOVIL_BANCO) {
   process.env.PAGO_MOVIL_TELEFONO ||= '04120000000';
@@ -14,7 +17,7 @@ if (!process.env.PAGO_MOVIL_TELEFONO || !process.env.PAGO_MOVIL_CEDULA || !proce
 }
 
 const { assertDatabaseConfig, assertGeminiConfig } = await import('../src/config.js');
-const { addMessage, initDb, resumeChat } = await import('../src/db.js');
+const { addMessage, clearCustomerThread, initDb, resumeChat } = await import('../src/db.js');
 const { syncCatalog } = await import('../src/services/productSync.js');
 const { getCatalogInfo } = await import('../src/services/catalogService.js');
 const { finalizeHandoff, handleCustomerMessage } = await import('../src/services/chatService.js');
@@ -31,7 +34,18 @@ const catalog = getCatalogInfo();
 
 console.log(`Catálogo: ${catalog.count} productos (${catalog.source})`);
 console.log('Chat de prueba con Bárbara (cliente: ' + name + ', +' + phone + ').');
-console.log('Escriba "salir" para terminar, o "reanudar" / "#reanudar" si quedó con el especialista.\n');
+console.log('Sin la espera de 3,5 s de WhatsApp: aquí cada mensaje se responde al momento.');
+console.log('Escriba "salir" para terminar, "borrar" para limpiar el hilo, o "reanudar" / "#reanudar" si quedó con el especialista.\n');
+
+if (process.argv.includes('--nuevo')) {
+  const removed = await clearCustomerThread(phone);
+  console.log(`Conversación de prueba borrada (${removed} mensajes). Empieza limpia.\n`);
+}
+
+function formatTimings(timings) {
+  if (!timings?.length) return '';
+  return timings.map((item) => (item.skipped ? `${item.step} omitido` : `${item.step} ${item.ms} ms`)).join(', ');
+}
 
 const printNotice = async (text) => console.log(`\n  [Aviso al asesor]\n  ${text.split('\n').join('\n  ')}\n`);
 
@@ -40,6 +54,11 @@ while (true) {
   if (!text) continue;
   const command = text.replace(/^#/, '').toLowerCase();
   if (command === 'salir') break;
+  if (command === 'borrar' || command === 'nuevo') {
+    const removed = await clearCustomerThread(phone);
+    console.log(`Listo: se borraron ${removed} mensajes de +${phone}. La próxima pregunta no ve el historial anterior.\n`);
+    continue;
+  }
   if (command === 'reanudar') {
     await resumeChat(phone);
     console.log('(Bárbara reactivada. Escriba "reanudar" o "#reanudar" si vuelve a quedar en pausa.)\n');
@@ -54,6 +73,8 @@ while (true) {
   for (const call of result.toolCalls ?? []) {
     console.log(`  ⚙ ${call.name}(${JSON.stringify(call.args)}) → ${JSON.stringify(call.result).slice(0, 160)}`);
   }
+  const steps = formatTimings(result.timings);
+  if (steps) console.log(`  Tiempos: ${steps}`);
   if (result.reply) {
     console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
     await addMessage(phone, 'model', result.historyText || result.reply);

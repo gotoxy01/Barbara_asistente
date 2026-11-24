@@ -18,6 +18,12 @@ describe('repositorio Postgres', { skip, concurrency: 1 }, () => {
     assert.equal(await db.hasInbound(wamid), true);
     const history = await db.getHistory(phone);
     assert.equal(history.at(-1).content, 'hola');
+    await db.addMessage(phone, 'model', '❌ Harina Pan: por ahora no la tenemos disponible');
+    const removed = await db.clearCustomerThread(phone);
+    assert.ok(removed >= 2);
+    assert.equal((await db.getHistory(phone)).length, 0);
+    const again = await db.getChat(phone);
+    assert.equal(again.status, 'BOT');
     await db.closeDb();
   });
 });

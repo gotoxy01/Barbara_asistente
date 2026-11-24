@@ -90,9 +90,12 @@ Con `GEMINI_API_KEY` y los datos de pago móvil y del panel en `.env`:
 
 ```powershell
 npm run chat
+npm run chat -- --nuevo
 npm run check
 npm test
 ```
+
+`npm run chat` no espera los 3,5 s con los que WhatsApp junta mensajes seguidos, e imprime el tiempo de cada paso (tasa, catálogo, modelo). `--nuevo`, o el comando `borrar` dentro del chat, limpia la conversación del cliente de prueba para que no quede una respuesta vieja.
 
 ## 5. Respaldo con código QR
 

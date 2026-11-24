@@ -60,6 +60,20 @@ describe('umbral de confianza y escalado', () => {
     assert.match(decision.reason, /búsqueda/);
   });
 
+  it('una pregunta general del catálogo no se escala aunque la búsqueda de "venta" haya sido floja', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 25,
+      retrievalScore: 0.25,
+      catalogTerms: ['venta'],
+      catalogType: 'none',
+      requiereEspecialista: true,
+      motivoEscalado: 'La búsqueda del catálogo quedó en 25%, por debajo del 85%',
+      customerText: 'Que tienes en la venta?',
+    });
+    assert.equal(decision.escalate, false);
+  });
+
   it('un saludo no se escala aunque la búsqueda anterior haya sido floja', () => {
     const decision = decideEscalation({
       ...base,

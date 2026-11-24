@@ -221,8 +221,8 @@ export async function hasInbound(wamid) {
   return Boolean(rows[0]);
 }
 
-export async function getHistory(phone, limit = config.historyLimit) {
-  const since = Date.now() - config.orderMemoryHours * 3600 * 1000;
+export async function getHistory(phone, limit = config.historyLimit, hours = config.orderMemoryHours) {
+  const since = Date.now() - Number(hours) * 3600 * 1000;
   const { rows } = await query(`
     SELECT sender_type, content FROM (
       SELECT m.sender_type, m.content, m.created_at, m.seq
@@ -239,6 +239,32 @@ export async function getHistory(phone, limit = config.historyLimit) {
     ORDER BY created_at ASC, seq ASC
   `, [phone, since, limit]);
   return rows.map((row) => ({ role: roleOf(row.sender_type), content: row.content }));
+}
+
+/** Borra el hilo de prueba (mensajes) y deja el chat en BOT, sin carrito abierto. */
+export async function clearCustomerThread(phone) {
+  const deleted = await query(`
+    DELETE FROM messages
+    WHERE conversation_id IN (
+      SELECT conv.id
+      FROM conversations conv
+      JOIN contacts c ON c.id = conv.contact_id
+      WHERE c.wa_id = $1
+    )
+  `, [phone]);
+  await query(`
+    UPDATE conversations conv SET
+      status = 'BOT',
+      paused = FALSE,
+      paused_at = NULL,
+      paused_until = NULL,
+      handoff_reason = NULL,
+      updated_at = NOW()
+    FROM contacts c
+    WHERE conv.contact_id = c.id AND c.wa_id = $1 AND conv.status <> 'CLOSED'
+  `, [phone]);
+  await clearActiveCarts(phone);
+  return deleted.rowCount ?? 0;
 }
 
 export async function listLatestMessagesSince(sinceMs) {

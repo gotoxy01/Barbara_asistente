@@ -25,7 +25,8 @@ const STOPWORDS = new Set(`
   me mas mi muy necesito necesitaria noches nos o otra otro para pero podria por porfa precio precios puede
   pueden que queria quiero quisiera saber se senor senora si sin sobre su sus tal tambien tardes te tendra
   tendran tenes tiene tienen tienes todo todos tu u un una uno unos unas usted ustedes vale valen vende
-  venden vendes y ya buscando busco consulta pregunta cotizar cotizacion disponible disponibles
+  venden vendes venta ventas y ya buscando busco consulta pregunta cotizar cotizacion disponible disponibles
+  catalogo categoria categorias oferta ofertas promocion promociones tienda abasto bodega
   nota voz transcrita
   kilo kilos kg medio gramos litro litros unidad unidades
 `.split(/\s+/).filter(Boolean));
@@ -444,6 +445,24 @@ export function getProducts() {
 export function getDeliveryCost() {
   getProducts();
   return cache.deliveryUsd ?? config.delivery.fallbackUsd;
+}
+
+/** Categorías y ejemplos reales, sin buscar una palabra suelta como si fuera un producto. */
+export function catalogOverviewText() {
+  const products = getProducts().filter((product) => product.categoria !== 'politica' && product.sku !== 'servicio-delivery');
+  const byCategory = new Map();
+  for (const product of products) {
+    const category = product.categoria || 'Otros';
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    const names = byCategory.get(category);
+    if (names.length < 3) names.push(product.nombre);
+  }
+  const lines = [...byCategory.entries()].map(([category, names]) => `- ${category}: ${names.join(', ')}`);
+  return [
+    'CONSULTA GENERAL de catálogo (qué tienen, categorías u ofertas). No es un producto concreto.',
+    'Responda con estas categorías y ejemplos reales. No invente productos ni precios. No diga que no hay. No pida especialista.',
+    lines.join('\n') || '- El catálogo todavía no tiene productos cargados.',
+  ].join('\n');
 }
 
 export function getCatalogInfo() {

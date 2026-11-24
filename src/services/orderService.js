@@ -184,7 +184,14 @@ export function trimHistoryForFreshSession(history) {
   const lastReply = history.map((m) => m.role).lastIndexOf('model');
   if (lastReply < 0) return history.slice(-6);
   const pending = history.slice(lastReply + 1);
-  return pending.length ? pending : history.slice(-4);
+  return pending.length ? pending : history.slice(-1);
+}
+
+/** Conversación nueva: solo lo que el cliente acaba de escribir, sin la respuesta vieja. */
+export function scopeHistoryForTurn(history, isNewConversation) {
+  const trimmed = trimHistorySinceCancel(history || []);
+  if (!isNewConversation) return trimmed;
+  return trimHistoryForFreshSession(trimmed);
 }
 
 /**

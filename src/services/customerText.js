@@ -24,6 +24,47 @@ export function isBareGreeting(text) {
   return clean.length > 0 && clean.length <= 40 && /^(hola+|ola|buenos dias|buenas tardes|buenas noches|buenas|buen dia|saludos|hey|epa|que tal|bendicion|hi|hello)$/.test(clean);
 }
 
+const GENERAL_WORDS = new Set(`
+  venta ventas tienda abasto local negocio bodega catalogo categoria categorias
+  oferta ofertas promocion promociones producto productos articulo articulos
+  cosa cosas algo viveres charcuteria ferreteria farmacia limpieza bebidas
+`.split(/\s+/).filter(Boolean));
+
+const FILLER = new Set(`
+  que tienes tienen venden vende vendes hay ofrecen maneja manejan para como cual
+  cuales usted ustedes los las una unos unas del con por sus este esta esto esa
+  ese eso son estan muy mas pero
+`.split(/\s+/).filter(Boolean));
+
+const GENERAL_ASK = /\b(que tienes|que tienen|que venden|que vende|que hay|que ofrecen|que manejan|catalogo|categorias|ofertas|promociones)\b/;
+
+function plain(text) {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[^a-z0-9ñ ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** "¿Qué tienes en la venta?" no nombra un producto. "¿Qué tienes de harina?" sí. */
+export function isGeneralCatalogAsk(text) {
+  const normalized = plain(text);
+  if (!GENERAL_ASK.test(normalized)) return false;
+  const leftovers = normalized.split(' ').filter((word) => {
+    if (word.length < 3) return false;
+    if (GENERAL_WORDS.has(word) || FILLER.has(word)) return false;
+    return true;
+  });
+  return leftovers.length === 0;
+}
+
+/** Saludo, comando o pregunta de catálogo sin un producto concreto: una sola llamada, sin auditor. */
+export function isLightTurn(text) {
+  return isOnlyGreetingOrControl(text) || isGeneralCatalogAsk(text);
+}
+
 export function isOnlyGreetingOrControl(text) {
   const lines = linesOf(text);
   return lines.length > 0 && lines.every((line) => isControlCommand(line) || isBareGreeting(line));

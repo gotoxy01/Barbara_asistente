@@ -11,6 +11,7 @@ export {
   addMessage,
   hasInbound,
   getHistory,
+  clearCustomerThread,
   listLatestMessagesSince,
   getLatestMessage,
   getLastModelMessageAt,
