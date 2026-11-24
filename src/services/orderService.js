@@ -3,7 +3,8 @@ import { config } from '../config.js';
 import { publishCrm } from '../crm/events.js';
 import * as db from '../db.js';
 import { toBolivares } from './bcvService.js';
-import { findProduct, getDeliveryCost, isBotellon, productLabel } from './catalogService.js';
+import { findProduct, getDeliveryCost, isBotellon, productLabel, searchProducts } from './catalogService.js';
+import { buildPriceResult, buildStockResult } from './priceTools.js';
 import { closeTicketsForPhone } from './ticketStore.js';
 
 export const BOLETA_MARKER = '[BOLETA]';
@@ -138,8 +139,8 @@ export function renderDeliveryFees(bcv) {
 }
 
 /** Resumen del carrito para el System Prompt de Bárbara. */
-export function renderOrderContext(phone, bcv) {
-  const order = db.getActiveOrder(phone);
+export async function renderOrderContext(phone, bcv) {
+  const order = await db.getActiveOrder(phone);
   if (!order || !order.items.length) {
     return [
       'El cliente aún no tiene productos en su pedido ACTUAL.',
@@ -183,7 +184,14 @@ export function trimHistoryForFreshSession(history) {
   const lastReply = history.map((m) => m.role).lastIndexOf('model');
   if (lastReply < 0) return history.slice(-6);
   const pending = history.slice(lastReply + 1);
-  return pending.length ? pending : history.slice(-4);
+  return pending.length ? pending : history.slice(-1);
+}
+
+/** Conversación nueva: solo lo que el cliente acaba de escribir, sin la respuesta vieja. */
+export function scopeHistoryForTurn(history, isNewConversation) {
+  const trimmed = trimHistorySinceCancel(history || []);
+  if (!isNewConversation) return trimmed;
+  return trimHistoryForFreshSession(trimmed);
 }
 
 /**
@@ -295,15 +303,15 @@ export function renderPaymentAlert({ ticketId, name, phone, note }) {
 }
 
 /** Tras resolver los pendientes: si el cliente ya había cerrado el pedido, se envía la boleta; si no, se pregunta si desea algo más. */
-function closePending(order, header, bcv) {
+async function closePending(order, header, bcv) {
   if (order.boleta_pendiente && order.items.length) {
     const t = computeTotals(order.items, bcv);
     Object.assign(order, { status: 'boleta', boleta_pendiente: 0, total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
-    db.saveOrder(order);
+    await db.saveOrder(order);
     return { order, message: `${header}\n\n${renderBoleta(order.items, bcv)}\n\n${renderPagoMovil()}\n\n${ADDRESS_QUESTION}` };
   }
   order.boleta_pendiente = 0;
-  db.saveOrder(order);
+  await db.saveOrder(order);
   const closing = order.items.length ? MORE_ITEMS_QUESTION : '¿Le puedo ayudar con algún otro producto? 😊';
   return { order, message: `${header}\n\n${closing}` };
 }
@@ -324,8 +332,8 @@ function matchPendingByTicket(pending, ticketItems) {
 }
 
 /** El encargado indicó que NO hay los productos consultados: se quitan del pedido y se avisa al cliente. */
-export function applyNotAvailable(phone, bcv, { ticketItems = null } = {}) {
-  const order = db.getActiveOrder(phone);
+export async function applyNotAvailable(phone, bcv, { ticketItems = null } = {}) {
+  const order = await db.getActiveOrder(phone);
   const allPending = order ? pendingWeighItems(order.items) : [];
   const pending = matchPendingByTicket(allPending, ticketItems);
   if (!pending.length) return { error: `+${phone} no tiene productos pendientes de consulta en el pedido actual.` };
@@ -340,8 +348,8 @@ export function applyNotAvailable(phone, bcv, { ticketItems = null } = {}) {
  * Aplica el precio del encargado a los pendientes del pedido ACTUAL.
  * Si viene de una nota (ticketItems), solo toca esos ítems — no precios viejos de otro pedido.
  */
-export function applyWeighedPrice(phone, usd, bcv, { ticketItems = null } = {}) {
-  const order = db.getActiveOrder(phone);
+export async function applyWeighedPrice(phone, usd, bcv, { ticketItems = null } = {}) {
+  const order = await db.getActiveOrder(phone);
   const allPending = order ? pendingWeighItems(order.items) : [];
   const pending = matchPendingByTicket(allPending, ticketItems);
   if (!pending.length) return { error: `+${phone} no tiene productos pendientes por pesar en el pedido actual.` };
@@ -368,6 +376,39 @@ export function applyWeighedPrice(phone, usd, bcv, { ticketItems = null } = {}) 
 // ---------------------------------------------------------------------------
 
 export const ORDER_TOOL_DECLARATIONS = [
+  {
+    name: 'search_catalog',
+    description: 'Busca en el inventario las palabras del cliente y devuelve solo sku reales. Úsela antes de get_price si no tiene el sku. Nunca invente un código.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        consulta: { type: Type.STRING, description: 'Lo que pidió el cliente, por ejemplo "harina pan"' },
+      },
+      required: ['consulta'],
+    },
+  },
+  {
+    name: 'get_price',
+    description: 'Precio vigente en USD y bolívares de un sku. Úsela SIEMPRE antes de decir un precio. El catálogo del prompt no trae montos.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        sku: { type: Type.STRING, description: 'Código sku tal como aparece en el catálogo, por ejemplo sku=harina-pan-1-kg' },
+      },
+      required: ['sku'],
+    },
+  },
+  {
+    name: 'get_stock',
+    description: 'Existencia vigente de un sku. Úsela antes de afirmar que hay o que no hay.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        sku: { type: Type.STRING, description: 'Código sku del catálogo' },
+      },
+      required: ['sku'],
+    },
+  },
   {
     name: 'agregar_producto',
     description: 'Agrega un producto del catálogo al pedido del cliente (o suma cantidad si ya estaba). Úsala cada vez que el cliente pida o confirme que quiere un producto.',
@@ -473,7 +514,31 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
   };
 
   const handlers = {
-    agregar_producto({ producto, cantidad }) {
+    async search_catalog({ consulta }) {
+      const found = await searchProducts(String(consulta || customerText || ''), {});
+      const productos = (found.products || []).slice(0, 5).map((product) => ({
+        sku: product.sku,
+        nombre: `${product.nombre} (${product.presentacion})`,
+        precio_usd: Number(product.precio).toFixed(2),
+      }));
+      if (!productos.length) {
+        return {
+          ok: false,
+          productos: [],
+          instruccion: 'No hay un sku para inventar. Diga que va a verificar en el inventario. No diga que no hay.',
+        };
+      }
+      return { ok: true, productos, instruccion: 'Use solo estos sku y estos precios. No invente otro código.' };
+    },
+    async get_price({ sku }) {
+      const row = await db.getProductBySku(String(sku || '').trim());
+      return buildPriceResult(row, bcv?.rate);
+    },
+    async get_stock({ sku }) {
+      const row = await db.getProductBySku(String(sku || '').trim());
+      return buildStockResult(row);
+    },
+    async agregar_producto({ producto, cantidad }) {
       const qty = Number(cantidad);
       if (!(qty > 0)) return { error: 'La cantidad debe ser mayor que cero.' };
       const found = findProduct(String(producto ?? ''));
@@ -494,6 +559,14 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
 
       const p = found.product;
+      const live = await db.getProductBySku(p.sku);
+      if (live) {
+        p.precio = Number(live.price);
+        p.stock = live.stock;
+      }
+      if (p.stock === 0) {
+        return { error: `"${p.nombre}" está sin stock.`, instruccion: 'Diga que por ahora no hay y no lo agregue al pedido.' };
+      }
       // Auditoría dura: no agregar algo que el cliente no pidió en este turno (evita arrastrar pedidos viejos).
       if (customerText && !customerMentionsProduct(p.nombre, customerText) && !customerMentionsProduct(producto, customerText)) {
         return {
@@ -510,16 +583,16 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
         if (!(addQty > 0)) return { error: 'No se pudo calcular el peso a partir del monto.' };
       } else if (isSoldByWeight(p) && !weightMentionedFor(p.nombre, customerText)) {
         // "un aguacate", "3 plátanos": unidades → balanza.
-        const result = handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
+        const result = await handlers.solicitar_pesaje({ producto: p.nombre, cantidad: `${qty} ${qty === 1 ? 'unidad' : 'unidades'}` });
         return { ...result, nota: `El cliente pidió ${p.nombre} por unidades (no por kilos ni monto): se envió a pesar en caja.` };
       }
 
-      const order = db.getOrCreateActiveOrder(phone);
+      const order = await db.getOrCreateActiveOrder(phone);
       const existing = order.items.find((i) => i.nombre === p.nombre && i.presentacion === p.presentacion);
       if (existing) existing.cantidad = round2(existing.cantidad + addQty);
       else order.items.push({ nombre: p.nombre, presentacion: p.presentacion, precio: p.precio, cantidad: addQty, botellon: isBotellon(p) });
       order.status = 'abierto';
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.cartChanged = true;
       state.catalogAdded = true;
       const nota = moneyUsd > 0 && isSoldByWeight(p)
@@ -528,7 +601,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       return { ok: true, agregado: `${addQty} x ${productLabel(p)}`, ...(nota ? { nota } : {}), pedido: summarize(order, bcv) };
     },
 
-    solicitar_pesaje({ producto, cantidad }) {
+    async solicitar_pesaje({ producto, cantidad }) {
       const nombre = String(producto ?? '').trim();
       if (!nombre) return { error: 'Indique el producto a pesar.' };
       // Nunca anotar el mensaje completo como "producto".
@@ -541,7 +614,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
             instruccion: 'Use el nombre corto del producto (ej. "tomate", "queso"), no la frase completa del cliente.',
           };
         }
-        return handlers.solicitar_pesaje({ producto: clean, cantidad });
+        return await handlers.solicitar_pesaje({ producto: clean, cantidad });
       }
       if (customerText && !customerMentionsProduct(nombre, customerText)) {
         return {
@@ -551,10 +624,10 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
       const qty = String(cantidad ?? '').trim();
       const detalle = qty ? `${nombre} (${qty})` : nombre;
-      const order = db.getOrCreateActiveOrder(phone);
+      const order = await db.getOrCreateActiveOrder(phone);
       order.items.push({ nombre, presentacion: 'por pesar', detalle, precio: null, cantidad: 1, pesable: true, botellon: false });
       order.status = 'abierto';
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.cartChanged = true;
       state.weighed.push(nombre);
       return {
@@ -564,18 +637,18 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       };
     },
 
-    consultar_encargado({ producto, cantidad, tipo }) {
+    async consultar_encargado({ producto, cantidad, tipo }) {
       const nombre = String(producto ?? '').trim();
       if (!nombre) return { error: 'Indique el artículo a consultar.' };
       const qty = String(cantidad ?? '').trim();
       const detalle = qty ? `${nombre} (${qty})` : nombre;
-      const order = db.getOrCreateActiveOrder(phone);
+      const order = await db.getOrCreateActiveOrder(phone);
       order.items.push({
         nombre, presentacion: tipo === 'farmacia' ? 'farmacia' : 'ferretería', detalle,
         precio: null, cantidad: 1, pesable: true, consulta: true, botellon: false,
       });
       order.status = 'abierto';
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.cartChanged = true;
       state.consulted.push({ nombre, tipo: tipo === 'farmacia' ? 'farmacia' : 'ferreteria' });
       return {
@@ -585,8 +658,8 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       };
     },
 
-    quitar_producto({ producto, cantidad }) {
-      const order = db.getActiveOrder(phone);
+    async quitar_producto({ producto, cantidad }) {
+      const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'El pedido está vacío.' };
       const wanted = String(producto ?? '').toLowerCase();
       const item = order.items.find((i) => `${i.nombre} (${i.presentacion})`.toLowerCase() === wanted)
@@ -597,32 +670,32 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       if (qty > 0 && qty < item.cantidad) item.cantidad = round2(item.cantidad - qty);
       else order.items = order.items.filter((i) => i !== item);
       order.status = 'abierto';
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.cartChanged = true;
       return { ok: true, pedido: summarize(order, bcv) };
     },
 
-    vaciar_pedido() {
-      const order = db.getActiveOrder(phone);
+    async vaciar_pedido() {
+      const order = await db.getActiveOrder(phone);
       if (order) {
         order.items = [];
         order.status = 'abierto';
         order.boleta_pendiente = 0;
-        db.saveOrder(order);
+        await db.saveOrder(order);
       }
       state.cartChanged = true;
       return { ok: true, instruccion: 'Confirme que el carrito quedó vacío y pregunte qué desea pedir ahora.' };
     },
 
-    cancelar_pedido() {
-      const canceled = db.cancelPendingOrders(phone);
+    async cancelar_pedido() {
+      const canceled = await db.cancelPendingOrders(phone);
       closeTicketsForPhone(phone);
-      db.resolveAlertsByPhoneKind(phone, 'order');
-      db.resolveAlertsByPhoneKind(phone, 'weigh');
-      db.resolveAlertsByPhoneKind(phone, 'payment');
-      db.resolveAlertsByPhoneKind(phone, 'ticket');
+      await db.resolveAlertsByPhoneKind(phone, 'order');
+      await db.resolveAlertsByPhoneKind(phone, 'weigh');
+      await db.resolveAlertsByPhoneKind(phone, 'payment');
+      await db.resolveAlertsByPhoneKind(phone, 'ticket');
       // Carrito limpio para el próximo pedido de este chat.
-      db.startFreshActiveOrder(phone);
+      await db.startFreshActiveOrder(phone);
       state.cartChanged = true;
       state.canceled = true;
       if (!canceled.length) {
@@ -644,12 +717,12 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       };
     },
 
-    generar_boleta() {
-      const order = db.getActiveOrder(phone);
+    async generar_boleta() {
+      const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'El pedido está vacío; pregunte al cliente qué productos desea.' };
       if (pendingWeighItems(order.items).length) {
         order.boleta_pendiente = 1;
-        db.saveOrder(order);
+        await db.saveOrder(order);
         state.waitingWeight = true;
         return {
           error: 'Hay productos esperando el precio del encargado (pesaje o consulta).',
@@ -658,7 +731,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       }
       const t = computeTotals(order.items, bcv);
       Object.assign(order, { status: 'boleta', total_usd: t.totalUsd, total_bs: t.totalBs, bcv_rate: t.rate ?? null });
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.boleta = renderBoleta(order.items, bcv);
       return {
         ok: true,
@@ -667,7 +740,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
     },
 
     async registrar_direccion({ direccion }) {
-      const order = db.getActiveOrder(phone);
+      const order = await db.getActiveOrder(phone);
       if (!order?.items.length) return { error: 'No hay un pedido en curso para este cliente.' };
       if (order.status !== 'boleta') return { error: 'Primero genere la boleta (generar_boleta) y confírmela con el cliente.' };
       const raw = String(direccion ?? '').trim();
@@ -687,7 +760,7 @@ export function createOrderTools({ phone, name, bcv, notify, customerText = '' }
       order.total_usd = t.totalUsd;
       order.total_bs = t.totalBs;
       order.bcv_rate = t.rate ?? null;
-      db.saveOrder(order);
+      await db.saveOrder(order);
       state.addressSaved = true;
       state.pickup = pickup;
 

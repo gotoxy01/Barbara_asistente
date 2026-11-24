@@ -49,6 +49,42 @@ describe('umbral de confianza y escalado', () => {
     assert.equal(decision.escalate, false);
   });
 
+  it('escala si la búsqueda híbrida queda por debajo del umbral', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 99,
+      retrievalScore: 0.4,
+      customerText: 'hay harina?',
+    });
+    assert.equal(decision.escalate, true);
+    assert.match(decision.reason, /búsqueda/);
+  });
+
+  it('una pregunta general del catálogo no se escala aunque la búsqueda de "venta" haya sido floja', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 25,
+      retrievalScore: 0.25,
+      catalogTerms: ['venta'],
+      catalogType: 'none',
+      requiereEspecialista: true,
+      motivoEscalado: 'La búsqueda del catálogo quedó en 25%, por debajo del 85%',
+      customerText: 'Que tienes en la venta?',
+    });
+    assert.equal(decision.escalate, false);
+  });
+
+  it('un saludo no se escala aunque la búsqueda anterior haya sido floja', () => {
+    const decision = decideEscalation({
+      ...base,
+      confianza: 90,
+      retrievalScore: 0.1,
+      catalogTerms: ['reanudar'],
+      customerText: 'Hola',
+    });
+    assert.equal(decision.escalate, false);
+  });
+
   it('no pisa una boleta ya calculada por el sistema', () => {
     const decision = decideEscalation({ ...base, confianza: 10, cartCommitted: true, customerText: 'es todo' });
     assert.equal(decision.escalate, false);

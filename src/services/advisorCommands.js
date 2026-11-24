@@ -53,14 +53,14 @@ async function handlePrice(body, quotedBody) {
 
   const phone = await pendingCustomer(match[1], quotedBody, '#precio <teléfono> <monto>');
   if (!phone) return;
-  await deliverToCustomer(phone, applyWeighedPrice(phone, usd, await getBcvRate()), `✅ Precio $ ${usd.toFixed(2)} enviado a +${phone}.`);
+  await deliverToCustomer(phone, await applyWeighedPrice(phone, usd, await getBcvRate()), `✅ Precio $ ${usd.toFixed(2)} enviado a +${phone}.`);
 }
 
 async function handleNotAvailable(body, quotedBody) {
   const explicit = body.match(/^#nohay\s+\+?(\d{8,15})\s*$/i)?.[1];
   const phone = await pendingCustomer(explicit, quotedBody, '#nohay <teléfono>');
   if (!phone) return;
-  await deliverToCustomer(phone, applyNotAvailable(phone, await getBcvRate()), `✅ Se le avisó a +${phone} que no hay disponible.`);
+  await deliverToCustomer(phone, await applyNotAvailable(phone, await getBcvRate()), `✅ Se le avisó a +${phone} que no hay disponible.`);
 }
 
 /** "0414-123.45.67", "+58 414 1234567" o "584141234567" -> "584141234567". */
@@ -82,15 +82,18 @@ function describeOrder(o) {
 async function handleCancelOrder(args, quotedBody) {
   const phone = normalizePhone(args) || phoneFromAlert(quotedBody);
   if (!phone) {
-    const pending = db.getPendingOrders();
+    const pending = await db.getPendingOrders();
     if (!pending.length) {
       await ack('No hay pedidos pendientes.');
       return;
     }
-    const list = pending.map((o) => {
-      const name = db.getChat(o.phone)?.name;
-      return `• +${o.phone}${name ? ` (${name})` : ''}: ${describeOrder(o)}`;
-    }).join('\n');
+    const lines = [];
+    for (const o of pending) {
+      const chat = await db.getChat(o.phone);
+      const name = chat?.name;
+      lines.push(`• +${o.phone}${name ? ` (${name})` : ''}: ${describeOrder(o)}`);
+    }
+    const list = lines.join('\n');
     await ack(`📋 *Pedidos pendientes (${pending.length})*\n${list}\n\nPara borrar uno escriba: #b <teléfono>`);
     return;
   }
@@ -99,7 +102,7 @@ async function handleCancelOrder(args, quotedBody) {
     return;
   }
 
-  const cancelled = db.cancelPendingOrders(phone);
+  const cancelled = await db.cancelPendingOrders(phone);
   if (!cancelled.length) {
     await ack(`+${phone} no tiene pedidos pendientes.`);
     return;
@@ -112,7 +115,7 @@ async function handleCancelOrder(args, quotedBody) {
 async function pendingCustomer(explicitPhone, quotedBody, usage) {
   const phone = explicitPhone || phoneFromAlert(quotedBody);
   if (phone) return phone;
-  const waiting = db.getOrdersAwaitingWeight();
+  const waiting = await db.getOrdersAwaitingWeight();
   if (waiting.length === 1) return waiting[0].phone;
   if (!waiting.length) {
     await ack('No hay clientes esperando un pesaje o consulta.');
@@ -130,8 +133,8 @@ async function deliverToCustomer(phone, result, confirmation) {
   }
   try {
     const sent = await sendMessage(phone, result.message);
-    db.addMessage(phone, 'model', outboundRecord(sent, result.message));
-    db.resolveAlertsByPhoneKind(phone, 'weigh');
+    await db.addMessage(phone, 'model', outboundRecord(sent, result.message));
+    await db.resolveAlertsByPhoneKind(phone, 'weigh');
     await ack(confirmation);
   } catch (err) {
     await ack(`❌ No se pudo enviar el mensaje a +${phone}: ${err.message}`);
@@ -171,14 +174,14 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
       return true;
     case 'pausar':
       if (!phone) break;
-      db.upsertChat(phone, null);
-      db.setSpecialist(phone);
+      await db.upsertChat(phone, null);
+      await db.setSpecialist(phone);
       await ack(`⏸️ +${phone} quedó con el especialista. Bárbara no responde hasta #reanudar.`);
       return true;
     case 'reanudar':
       if (!phone) break;
-      db.upsertChat(phone, null);
-      db.resumeChat(phone);
+      await db.upsertChat(phone, null);
+      await db.resumeChat(phone);
       await ack(`▶️ Bárbara reactivada para +${phone}.`);
       return true;
     case 'r':
@@ -186,9 +189,9 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
       if (!phone || !rest.trim()) break;
       try {
         const sent = await sendMessage(phone, rest.trim());
-        recordAdvisorMessage(phone, outboundRecord(sent, rest.trim()));
-        const specialist = db.getChat(phone)?.status === 'SPECIALIST';
-        if (!specialist) db.pauseChat(phone, manualPauseMs());
+        await recordAdvisorMessage(phone, outboundRecord(sent, rest.trim()));
+        const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+        if (!specialist) await db.pauseChat(phone, manualPauseMs());
         await ack(sent?.mode === 'template'
           ? `✅ La ventana de 24 h está cerrada: a +${phone} se le envió la plantilla, no el texto libre.`
           : specialist

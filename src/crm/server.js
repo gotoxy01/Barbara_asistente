@@ -56,19 +56,19 @@ function createApp() {
 
   app.use('/api', auth);
 
-  app.get('/api/chats', (_req, res) => {
-    res.json({ chats: db.listRecentChats() });
+  app.get('/api/chats', async (_req, res) => {
+    res.json({ chats: await db.listRecentChats() });
   });
 
-  app.get('/api/chats/:phone/messages', (req, res) => {
+  app.get('/api/chats/:phone/messages', async (req, res) => {
     const phone = String(req.params.phone || '').replace(/\D/g, '');
     if (phone.length < 10) return res.status(400).json({ error: 'Teléfono inválido' });
-    const chat = db.getChat(phone);
+    const chat = await db.getChat(phone);
     res.json({
       phone,
       name: chat?.name || null,
       paused: chat?.paused === 1,
-      messages: db.getChatMessages(phone),
+      messages: await db.getChatMessages(phone),
     });
   });
 
@@ -78,13 +78,13 @@ function createApp() {
     if (phone.length < 10) return res.status(400).json({ error: 'Teléfono inválido' });
     if (!text) return res.status(400).json({ error: 'Escriba un mensaje' });
 
-    db.upsertChat(phone, null);
+    await db.upsertChat(phone, null);
     try {
       const sent = await sendMessage(phone, text);
       const stored = outboundRecord(sent, text);
-      recordAdvisorMessage(phone, stored);
-      const specialist = db.getChat(phone)?.status === 'SPECIALIST';
-      if (!specialist) db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
+      await recordAdvisorMessage(phone, stored);
+      const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+      if (!specialist) await db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
       return res.json({
         ok: true,
         mode: sent?.mode || 'text',
@@ -98,29 +98,33 @@ function createApp() {
     }
   });
 
-  app.get('/api/orders/today', (_req, res) => {
-    const orders = db.getOrdersToday().map((o) => ({
-      id: o.id,
-      phone: o.phone,
-      name: db.getChat(o.phone)?.name || null,
-      status: o.status,
-      items: o.items,
-      address: o.address,
-      totalUsd: o.total_usd,
-      totalBs: o.total_bs,
-      updatedAt: o.updated_at,
-    }));
+  app.get('/api/orders/today', async (_req, res) => {
+    const orders = [];
+    for (const o of await db.getOrdersToday()) {
+      const chat = await db.getChat(o.phone);
+      orders.push({
+        id: o.id,
+        phone: o.phone,
+        name: chat?.name || null,
+        status: o.status,
+        items: o.items,
+        address: o.address,
+        totalUsd: o.total_usd,
+        totalBs: o.total_bs,
+        updatedAt: o.updated_at,
+      });
+    }
     res.json({ orders });
   });
 
-  app.get('/api/alerts', (_req, res) => {
-    res.json({ alerts: db.listOpenAlerts() });
+  app.get('/api/alerts', async (_req, res) => {
+    res.json({ alerts: await db.listOpenAlerts() });
   });
 
-  app.post('/api/alerts/:id/done', (req, res) => {
+  app.post('/api/alerts/:id/done', async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'Id inválido' });
-    db.resolveAlert(id);
+    await db.resolveAlert(id);
     res.json({ ok: true });
   });
 
@@ -228,12 +232,12 @@ function createApp() {
     if (phone.length < 10) return res.status(400).json({ error: 'Teléfono inválido' });
     if (!(usd > 0)) return res.status(400).json({ error: 'Indique un monto en dólares mayor que cero' });
 
-    const result = applyWeighedPrice(phone, usd, await getBcvRate());
+    const result = await applyWeighedPrice(phone, usd, await getBcvRate());
     if (result.error) return res.status(400).json({ error: result.error });
     try {
       const sent = await sendMessage(phone, result.message);
-      db.addMessage(phone, 'model', outboundRecord(sent, result.message));
-      db.resolveAlertsByPhoneKind(phone, 'weigh');
+      await db.addMessage(phone, 'model', outboundRecord(sent, result.message));
+      await db.resolveAlertsByPhoneKind(phone, 'weigh');
       return res.json({ ok: true, message: result.message, mode: sent?.mode || 'text' });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });
@@ -244,12 +248,12 @@ function createApp() {
     const phone = String(req.params.phone || '').replace(/\D/g, '');
     if (phone.length < 10) return res.status(400).json({ error: 'Teléfono inválido' });
 
-    const result = applyNotAvailable(phone, await getBcvRate());
+    const result = await applyNotAvailable(phone, await getBcvRate());
     if (result.error) return res.status(400).json({ error: result.error });
     try {
       const sent = await sendMessage(phone, result.message);
-      db.addMessage(phone, 'model', outboundRecord(sent, result.message));
-      db.resolveAlertsByPhoneKind(phone, 'weigh');
+      await db.addMessage(phone, 'model', outboundRecord(sent, result.message));
+      await db.resolveAlertsByPhoneKind(phone, 'weigh');
       return res.json({ ok: true, message: result.message, mode: sent?.mode || 'text' });
     } catch (err) {
       return res.status(502).json({ error: `No se pudo enviar: ${err.message}` });

@@ -53,8 +53,8 @@ export function outboundRecord(result, text) {
   return text;
 }
 
-function freeTextAllowed(phone) {
-  const chat = db.getChat(phone);
+async function freeTextAllowed(phone) {
+  const chat = await db.getChat(phone);
   return isWithinServiceWindow(chat?.last_user_message_at, Date.now(), config.serviceWindowHours);
 }
 
@@ -71,7 +71,7 @@ async function sendApprovedTemplate(phone, reason) {
  */
 export async function sendMessage(phone, text) {
   if (!sender) throw new Error('El canal de WhatsApp aún no está conectado');
-  if (channel === 'cloud' && !freeTextAllowed(phone)) {
+  if (channel === 'cloud' && !await freeTextAllowed(phone)) {
     return sendApprovedTemplate(phone, 'Fuera de la ventana de 24 h.');
   }
   try {

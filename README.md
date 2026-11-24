@@ -1,8 +1,23 @@
 # Bárbara – Abasto Los Cuchos
 
-Asistente de WhatsApp de la bodega. El canal principal es la **WhatsApp Cloud API oficial** de Meta. Responde con Google Gemini, busca precios en el catálogo local, arma la boleta en código (no se la inventa el modelo) y guarda el historial en SQLite (`barbara.db`).
+Asistente de WhatsApp de la bodega. El canal principal es la **WhatsApp Cloud API oficial** de Meta. Responde con Google Gemini, consulta precios en PostgreSQL local al momento de responder y arma la boleta en código (no se la inventa el modelo).
 
 El modo con código QR (`whatsapp-web.js`) queda como respaldo.
+
+Todos los datos (número de WhatsApp, asesor, pago móvil, claves) se cambian en un solo archivo: **`.env`**.
+
+## Primeros pasos
+
+1. Instale Node.js 22 y PostgreSQL 16 con pgvector. El detalle está en [docs/instalacion-windows.md](docs/instalacion-windows.md).
+2. Doble clic en `configurar-barbara.bat`, o en una consola: `npm run setup`.
+3. Le pide la clave del usuario `postgres` (no se ve al escribir). La clave de la base `barbara` y la frase del panel las inventa y las guarda en `.env`. Después se abre el archivo para el token de Meta, el Phone number ID y Gemini.
+4. El mismo paso crea la base si aún no existe.
+5. `npm run doctor` debe mostrar OK en cada línea.
+6. `npm start`.
+
+Para cambiar el número del negocio o el del asesor, edite `.env` y vuelva a iniciar. No hace falta modificar el programa.
+
+Si la base ya está instalada y solo quiere crearla de nuevo: `npm run db:create`.
 
 ## 1. Instalación
 
@@ -14,9 +29,19 @@ copy .env.example .env
 Complete `.env`. Estas variables son obligatorias:
 
 - Cloud: `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_TEMPLATE_NAME`
-- Siempre: `GEMINI_API_KEY`, `PAGO_MOVIL_TELEFONO`, `PAGO_MOVIL_CEDULA`, `PAGO_MOVIL_BANCO`, `CRM_TOKEN`
+- Siempre: `DATABASE_URL`, `GEMINI_API_KEY`, `PAGO_MOVIL_TELEFONO`, `PAGO_MOVIL_CEDULA`, `PAGO_MOVIL_BANCO`, `CRM_TOKEN`
 
 Sin ellas el proceso no arranca. No escriba teléfonos, cédulas ni tokens en el código.
+
+## 1b. En la PC de la tienda
+
+La base es **PostgreSQL instalado en esa PC**, con pgvector. Los datos del negocio no van a Supabase. El paso a paso (Postgres, túnel de Cloudflare, servicio de Windows y Redis opcional) está en [docs/instalacion-windows.md](docs/instalacion-windows.md).
+
+Si venía de `barbara.db`:
+
+```powershell
+npm run migrate:sqlite
+```
 
 ## 2. WhatsApp Cloud API
 
@@ -65,14 +90,17 @@ Con `GEMINI_API_KEY` y los datos de pago móvil y del panel en `.env`:
 
 ```powershell
 npm run chat
+npm run chat -- --nuevo
 npm run check
 npm test
 ```
+
+`npm run chat` no espera los 3,5 s con los que WhatsApp junta mensajes seguidos, e imprime el tiempo de cada paso (tasa, catálogo, modelo). `--nuevo`, o el comando `borrar` dentro del chat, limpia la conversación del cliente de prueba para que no quede una respuesta vieja.
 
 ## 5. Respaldo con código QR
 
 `npm run start:qr` abre WhatsApp Web. No es la API oficial: el teléfono del negocio debe quedar vinculado y la PC encendida. Úselo si Cloud todavía no está listo. El panel y el catálogo funcionan igual. La ventana de 24 horas y las plantillas aplican al canal Cloud.
 
-## 6. Lo que esta fase no incluye
+## 6. Lo que falta
 
-Postgres con `pgvector`, Redis/BullMQ, visión de fotos, recontacto automático del tipo “déjame lo pienso” y un CRM con etiquetas y embudo quedan para fases siguientes. La cola actual tiene la misma forma (`push` por cliente) para poder cambiarla por Redis sin reescribir el webhook.
+Visión de fotos, el recontacto automático del tipo “déjame lo pienso” y un CRM con etiquetas y embudo. Postgres local y la cola Redis opcional ya están.

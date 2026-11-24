@@ -72,7 +72,7 @@ export class GeminiError extends Error {
   }
 }
 
-function classifyError(err) {
+export function classifyError(err) {
   if (err instanceof GeminiError) return err;
   const message = String(err?.message ?? err);
   const status = Number(err?.status ?? message.match(/"code"\s*:\s*(\d{3})/)?.[1] ?? 0);
@@ -85,9 +85,13 @@ function classifyError(err) {
     return new GeminiError(message, { status, kind: 'auth', retryable: false,
       hint: 'La clave no es válida para la Gemini API. Genere una en https://aistudio.google.com/apikey' });
   }
-  if (status === 404 || status === 400) {
+  if (status === 404) {
+    return new GeminiError(message, { status, kind: 'model', retryable: true,
+      hint: `El modelo no existe; se prueba el siguiente. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
+  }
+  if (status === 400) {
     return new GeminiError(message, { status, kind: 'model', retryable: false,
-      hint: `Revise GEMINI_MODEL (actual: ${config.gemini.model}); ejecute "npm run check" para ver los modelos disponibles.` });
+      hint: `Gemini rechazó el pedido. Revise GEMINI_MODEL (actual: ${config.gemini.model}).` });
   }
   if (status === 429) {
     const quota = /quota|per day|limit: 0/i.test(message);
@@ -107,7 +111,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MAX_TOOL_ROUNDS = 6;
 
-const STABLE_MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash'];
 const COOLDOWN_MS = 25_000;
 
 /** El principal, los flash estables y al final el respaldo si es un modelo lite (se saturan primero). */
@@ -116,7 +119,7 @@ function modelRotation(current) {
   const lite = (name) => /lite/i.test(name ?? '');
   const ordered = [current || config.gemini.model];
   if (fallback && !lite(fallback)) ordered.push(fallback);
-  ordered.push(...STABLE_MODELS);
+  ordered.push(...config.gemini.stableModels);
   if (fallback && lite(fallback)) ordered.push(fallback);
   return [...new Set(ordered.filter(Boolean))];
 }
@@ -172,8 +175,11 @@ async function withRetries(fn, turn) {
 
     turn.model = model;
     await acquireGemini();
+    const startedCall = Date.now();
     try {
-      return await fn(model);
+      const value = await fn(model);
+      verbose(`Gemini ${model} respondió en ${Date.now() - startedCall} ms`);
+      return value;
     } catch (err) {
       lastError = classifyError(err);
       if (!lastError.retryable || Date.now() - started >= budget) throw lastError;
@@ -193,19 +199,56 @@ async function withRetries(fn, turn) {
   });
 }
 
-async function callGemini(model, systemPrompt, contents, tools) {
+/** Gemini 3 razona por defecto y un "Hola" se iba a 30 s. Mínimo en 3.x; apagado en 2.x. */
+export function thinkingConfigFor(model) {
+  if (/gemini-2(\.|$)/i.test(model || '')) return { thinkingBudget: 0 };
+  return { thinkingLevel: 'MINIMAL' };
+}
+
+export function salesCallConfig(model, tools) {
   const withTools = Boolean(tools?.declarations?.length);
-  return getClient().models.generateContent({
+  return {
+    temperature: 0.3,
+    maxOutputTokens: config.gemini.maxOutputTokens,
+    thinkingConfig: thinkingConfigFor(model),
+    ...(withTools
+      ? {
+          tools: [{ functionDeclarations: tools.declarations }],
+          toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+        }
+      : { responseMimeType: 'application/json' }),
+  };
+}
+
+/** Varias herramientas del mismo turno, a la vez. El orden de la respuesta sigue el de las llamadas. */
+export async function runToolCalls(calls, execute) {
+  const started = Date.now();
+  const done = await Promise.all((calls || []).map(async (call) => {
+    const result = await execute(call.name, call.args ?? {});
+    return {
+      name: call.name,
+      args: call.args ?? {},
+      result,
+      response: { functionResponse: { id: call.id, name: call.name, response: result } },
+    };
+  }));
+  return { calls: done, ms: Date.now() - started };
+}
+
+async function callGemini(model, systemPrompt, contents, tools) {
+  const request = (generation) => getClient().models.generateContent({
     model,
     contents,
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.3,
-      ...(withTools
-        ? { tools: [{ functionDeclarations: tools.declarations }] }
-        : { responseMimeType: 'application/json' }),
-    },
+    config: { systemInstruction: systemPrompt, ...generation },
   });
+  try {
+    return await request(salesCallConfig(model, tools));
+  } catch (err) {
+    if (!/thinking/i.test(String(err?.message || err))) throw err;
+    const { thinkingConfig, ...withoutThinking } = salesCallConfig(model, tools);
+    verbose(`Gemini ${model} no aceptó el tope de razonamiento; se reintenta sin él.`);
+    return request(withoutThinking);
+  }
 }
 
 const TRANSCRIBE_PROMPT =
@@ -286,13 +329,10 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
 
     // Se reenvía el contenido del modelo tal cual (incluye las firmas de razonamiento que exige Gemini 3).
     contents.push(response.candidates[0].content);
-    const responses = [];
-    const roundCalls = [];
-    for (const call of calls) {
-      const result = await tools.execute(call.name, call.args ?? {});
-      roundCalls.push({ name: call.name, args: call.args ?? {}, result });
-      responses.push({ functionResponse: { id: call.id, name: call.name, response: result } });
-    }
+    const batch = await runToolCalls(calls, (name, args) => tools.execute(name, args));
+    verbose(`Herramientas en paralelo (${batch.calls.length}) en ${batch.ms} ms.`);
+    const roundCalls = batch.calls.map(({ name, args, result }) => ({ name, args, result }));
+    const responses = batch.calls.map((item) => item.response);
     toolCalls.push(...roundCalls);
 
     const finalText = tools.finalize?.(roundCalls);

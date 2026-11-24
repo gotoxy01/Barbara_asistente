@@ -79,3 +79,18 @@ export function createInboundQueue({
     },
   };
 }
+
+/**
+ * Redis/BullMQ si hay REDIS_URL. Si no, la cola en memoria de este proceso.
+ * El objeto que devuelve siempre tiene push(key, item).
+ */
+export async function openInboundQueue(options) {
+  const { config } = await import('./config.js');
+  if (config.redisUrl) {
+    const { startRedisInboundQueue } = await import('./queue/redisInbound.js');
+    console.log('Cola de mensajes: Redis/BullMQ');
+    return startRedisInboundQueue({ ...options, redisUrl: config.redisUrl });
+  }
+  console.log('Cola de mensajes: memoria de este proceso (defina REDIS_URL para Redis)');
+  return createInboundQueue(options);
+}

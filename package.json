@@ -5,20 +5,27 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "start:cloud": "node src/server.js",
-    "start:qr": "node src/wweb.js",
-    "chat": "node scripts/chat.js",
-    "check": "node scripts/check-gemini.js",
-    "test": "node --test ./test/*.test.js"
+    "start": "node --use-system-ca src/server.js",
+    "start:cloud": "node --use-system-ca src/server.js",
+    "start:qr": "node --use-system-ca src/wweb.js",
+    "chat": "node --use-system-ca scripts/chat.js",
+    "check": "node --use-system-ca scripts/check-gemini.js",
+    "test": "node --test ./test/*.test.js",
+    "migrate:sqlite": "node --use-system-ca scripts/migrate-from-sqlite.js",
+    "setup": "node --use-system-ca scripts/setup.js",
+    "db:create": "node --use-system-ca scripts/db-create.js",
+    "doctor": "node --use-system-ca scripts/doctor.js"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
+    "bullmq": "^5.81.6",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "ioredis": "^5.11.1",
+    "pg": "^8.23.1",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "1.34.7"
   },

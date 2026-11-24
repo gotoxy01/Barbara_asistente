@@ -4,9 +4,10 @@ import { info, verbose, error as logError } from '../log.js';
 import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
+import { historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
 import { shouldOpenPaymentTicket } from './paymentIntent.js';
 import { getBcvRate } from './bcvService.js';
-import { searchProducts } from './catalogService.js';
+import { catalogOverviewText, searchProducts } from './catalogService.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
@@ -22,8 +23,7 @@ import {
   renderDeliveryFees,
   renderOrderContext,
   isShortFollowUp,
-  trimHistoryForFreshSession,
-  trimHistorySinceCancel,
+  scopeHistoryForTurn,
   renderWeighWaitMessage,
   weightMentionedFor,
 } from './orderService.js';
@@ -75,7 +75,7 @@ export async function notifyAdvisor(text, options = {}) {
   const title = options.title || kindLabel(kind);
   if (!options.skipCrm) {
     try {
-      db.addAdvisorAlert({ kind, phone, title, body: text });
+      await db.addAdvisorAlert({ kind, phone, title, body: text });
     } catch (err) {
       logError('No se pudo guardar la alerta del CRM:', err.message);
     }
@@ -176,7 +176,7 @@ async function ensureHandOff(aiText, customerText, tools) {
   const text = String(customerText || '').trim();
   if (!text) return;
 
-  const found = searchProducts(text, {});
+  const found = await searchProducts(text, {});
   const weighables = (found.products || []).filter((p) => isSoldByWeight(p));
   if (!weighables.length) return;
 
@@ -231,63 +231,54 @@ function greetingReply(text, isNewConversation) {
  * Evita que "¿hay de la pequeña?" se interprete como otro producto (ej. bolsa de hielo)
  * cuando el cliente venía hablando de samba/chocolate u otra cosa.
  */
-function buildProductContext(history, bcv) {
-  const lastReply = history.map((m) => m.role).lastIndexOf('model');
-  const pending = history
-    .slice(lastReply + 1)
-    .filter((m) => m.role === 'user' && !String(m.content).startsWith('[El cliente'))
-    .map((m) => cleanMsgContent(m.content))
-    .filter(Boolean)
-    .slice(-5);
-
-  const thread = recentThread(history, THREAD_FOLLOW_MSGS);
-  const threadBlob = thread.map((m) => m.content).join('\n');
-  const pendingBlob = pending.join('\n');
-  const followUp = !pending.length || isShortFollowUp(pendingBlob)
-    || /pequeñ|grand|median|esa|ese|esos|esas|otra|otro|mismo|misma|de\s+la|de\s+el|y\s+el|y\s+la/i.test(pendingBlob);
-
-  let result = pending.length ? searchProducts(pending, { bcv }) : searchProducts(threadBlob, { bcv });
-
-  // Seguimiento o coincidencia floja → buscar con los últimos 4 mensajes del hilo.
-  if (followUp || result.type === 'none' || result.soft) {
-    const withThread = searchProducts(
-      thread.length ? `${threadBlob}\n${pendingBlob}`.trim() : pendingBlob,
-      { bcv },
-    );
-    if (withThread.type === 'matches') {
-      const hilo = thread
-        .map((m) => `• ${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${m.content}`)
-        .join('\n');
-      result = {
-        ...withThread,
-        text: [
-          `SEGUIMIENTO DEL HILO (últimos ${thread.length || 1} mensajes — la pregunta actual continúa ESTE tema; no cambie de producto):`,
-          hilo || pendingBlob,
-          '',
-          withThread.text,
-          '',
-          'Si el cliente dijo “pequeña/grande/esa/la de…”, filtre las opciones ANTERIORES del mismo producto (ej. chocolates), no ofrezca un producto distinto.',
-        ].join('\n'),
-      };
-    } else if (result.type === 'none' && pending.length) {
-      const previousUsers = history
-        .slice(0, lastReply + 1)
-        .filter((m) => m.role === 'user')
-        .map((m) => cleanMsgContent(m.content))
-        .filter(Boolean)
-        .slice(-3);
-      if (previousUsers.length) {
-        const retry = searchProducts([...previousUsers, ...pending], { bcv });
-        if (retry.type === 'matches') result = retry;
-      }
-    }
+async function buildProductContext(history, bcv, currentText = '') {
+  if (isOnlyGreetingOrControl(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      general: false,
+      text: 'CONSULTA GENERAL (saludo o comando): no mencione productos ni diga que no hay.',
+    };
   }
-
+  if (isGeneralCatalogAsk(currentText)) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      general: true,
+      text: catalogOverviewText(),
+    };
+  }
+  const current = substantiveLines(currentText);
+  const earlier = substantiveLines(
+    (history || [])
+      .filter((message) => message.role === 'user')
+      .map((message) => cleanMsgContent(message.content))
+      .join('\n'),
+  );
+  const followUp = current.length === 1 && isShortFollowUp(current[0]);
+  const query = (followUp ? [...earlier.slice(-4), ...current] : current).join('\n')
+    || earlier.slice(-3).join('\n');
+  if (!query.trim()) {
+    return {
+      type: 'none',
+      terms: [],
+      products: [],
+      retrievalScore: null,
+      text: 'CONSULTA GENERAL (sin un producto específico): no mencione productos.',
+    };
+  }
+  const started = Date.now();
+  const result = await searchProducts(query, { bcv });
+  verbose(`Búsqueda de catálogo en ${Date.now() - started} ms (${result.type}, ${result.products?.length || 0} productos).`);
   return result;
 }
 
-function conversationSummary(phone) {
-  return db.getHistory(phone)
+function summarizeTurns(history) {
+  return (history || [])
     .slice(-6)
     .map((m) => `${m.role === 'user' ? 'Cliente' : 'Bárbara'}: ${cleanMsgContent(m.content)}`)
     .filter((line) => !line.endsWith(':'))
@@ -307,22 +298,23 @@ export function handleCustomerMessage(message, options) {
 }
 
 async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor } = {}) {
-  let chat = db.upsertChat(phone, name);
-  db.touchCustomerWindow(phone);
-  chat = db.getChat(phone);
+  let chat = await db.upsertChat(phone, name);
+  await db.touchCustomerWindow(phone);
+  chat = await db.getChat(phone);
   if (isPauseExpired(chat)) {
-    db.resumeChat(phone);
-    chat = db.getChat(phone);
+    await db.resumeChat(phone);
+    chat = await db.getChat(phone);
   }
 
-  const lastReplyAt = db.getLastModelMessageAt(phone);
+  const lastReplyAt = await db.getLastModelMessageAt(phone);
   const isNewConversation = !lastReplyAt || Date.now() - lastReplyAt > config.newConversationHours * 3600 * 1000;
-  const alreadyStored = wamid && db.hasInbound(wamid);
+  const alreadyStored = wamid && await db.hasInbound(wamid);
   if (alreadyStored) {
-    const latest = db.getLatestMessage(phone);
+    const latest = await db.getLatestMessage(phone);
     if (latest?.role === 'model') return { reply: null, escalated: false, paused: false, duplicate: true };
   } else {
-    db.addMessage(phone, 'user', text, wamid);
+    const durantePausa = chat.status === 'SPECIALIST' || chat.paused === 1 || chat.paused === true;
+    await db.addMessage(phone, 'user', text, wamid, durantePausa ? { raw: { durante_pausa: 'si' } } : {});
   }
   const displayName = chat.name || name;
 
@@ -335,8 +327,8 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     return { reply: null, escalated: false, paused: true };
   }
 
-  const payOrder = db.getActiveOrder(phone);
-  if (shouldOpenPaymentTicket({ text, history: db.getHistory(phone), order: payOrder })) {
+  const payOrder = await db.getActiveOrder(phone);
+  if (shouldOpenPaymentTicket({ text, history: await db.getHistory(phone), order: payOrder })) {
     const note = payOrder
       ? `Pedido #${payOrder.id} (${payOrder.status})${payOrder.total_bs ? ` · Bs. ${payOrder.total_bs.toFixed(2)}` : ''}`
       : text.slice(0, 80);
@@ -345,19 +337,19 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
 
   // Conversación nueva (hueco largo) o tras cancelaciones: no arrastrar carrito/notas viejas.
   if (isNewConversation) {
-    resetCustomerOrderSession(phone, { quiet: true });
+    await resetCustomerOrderSession(phone, { quiet: true });
   }
 
-  const history = db.getHistory(phone);
+  const history = historyForModel(await db.getHistory(phone, config.historyLimit, config.newConversationHours));
   const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
 
 /** Limpia carrito abierto + notas de caja de este chat (pedidos recibidos en cocina no se tocan). */
-function resetCustomerOrderSession(phone, { quiet = false } = {}) {
-  const cleared = db.clearActiveCarts(phone);
+async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
+  const cleared = await db.clearActiveCarts(phone);
   closeTicketsForPhone(phone);
-  db.startFreshActiveOrder(phone);
+  await db.startFreshActiveOrder(phone);
   if (!quiet && cleared.length) {
     verbose(`[${phone}] Sesión de pedido reiniciada (${cleared.length} carrito(s) viejo(s) descartados).`);
   }
@@ -367,24 +359,33 @@ function resetCustomerOrderSession(phone, { quiet = false } = {}) {
  * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
  */
 async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
+  history = historyForModel(history);
+  const turnStarted = Date.now();
+  const timings = [];
+  const closeTimings = () => {
+    if (!timings.some((item) => item.step === 'total')) timings.push({ step: 'total', ms: Date.now() - turnStarted });
+    return timings;
+  };
+  const lap = (step, startedAt) => {
+    const ms = Date.now() - startedAt;
+    timings.push({ step, ms });
+    verbose(`${step}: ${ms} ms`);
+    return Date.now();
+  };
+  let mark = turnStarted;
   const bcv = await getBcvRate();
-  // Tras cancelar se corta el historial; siempre se conservan al menos los últimos 4 msgs del hilo.
-  let scopedHistory = trimHistorySinceCancel(history);
-  if (isNewConversation) {
-    const fresh = trimHistoryForFreshSession(scopedHistory);
-    scopedHistory = scopedHistory.slice(-THREAD_FOLLOW_MSGS);
-    if (fresh.length > scopedHistory.length) scopedHistory = fresh;
-  }
-  if (scopedHistory.length < THREAD_FOLLOW_MSGS && history.length) {
-    scopedHistory = trimHistorySinceCancel(history).slice(-THREAD_FOLLOW_MSGS);
-  }
+  mark = lap('tasa', mark);
+  // Conversación nueva: solo lo escrito después del último silencio largo. No se rellena con la respuesta vieja.
+  const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  const lightTurn = isLightTurn(text);
 
-  const products = buildProductContext(scopedHistory, bcv);
-  const productContext = `${products.text}\n${renderDeliveryFees(bcv)}`;
+  const products = await buildProductContext(scopedHistory, bcv, text);
+  mark = lap('catálogo', mark);
+  const productContext = lightTurn ? products.text : `${products.text}\n${renderDeliveryFees(bcv)}`;
   const customerText = customerTextWithThread(scopedHistory, text);
   const tools = createOrderTools({ phone, name: displayName, bcv, notify, customerText });
   const systemPrompt = buildSystemPrompt({
-    name: displayName, phone, productContext, orderContext: renderOrderContext(phone, bcv), isNewConversation,
+    name: displayName, phone, productContext, orderContext: await renderOrderContext(phone, bcv), isNewConversation,
   });
 
   let reply;
@@ -392,9 +393,11 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let toolCalls;
   let model;
   let salesMeta = null;
-  const pendingBefore = pendingWeighItems(db.getActiveOrder(phone)?.items ?? []).length;
+  const pendingBefore = pendingWeighItems((await db.getActiveOrder(phone))?.items ?? []).length;
   try {
-    const result = await generateBarbaraReply(systemPrompt, scopedHistory, tools);
+    verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini${lightTurn ? ' (sin herramientas ni auditor)' : ''}.`);
+    const result = await generateBarbaraReply(systemPrompt, scopedHistory, lightTurn ? undefined : tools);
+    mark = lap('Gemini', mark);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
     const decision = decideEscalation({
       confianza: result.confianza ?? 0,
@@ -403,13 +406,15 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       customerText: text,
       catalogType: products.type,
       catalogTerms: products.terms,
+      retrievalScore: products.retrievalScore,
+      generalCatalog: products.general === true,
       threshold: config.confidenceThreshold,
       cartCommitted,
     });
     if ((result.ignore || decision.ignore) && !tools.state.cartChanged && !isGreeting(text)) {
       verbose(`[${phone}] Mensaje ajeno a la bodega: Bárbara no responde.`);
-      if (resume) db.addMessage(phone, 'model', SILENT_MARK);
-      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools };
+      if (resume) await db.addMessage(phone, 'model', SILENT_MARK);
+      return { reply: null, escalated: false, paused: false, ignored: true, productContext, model: result.model, tools, timings: closeTimings(), summary: summarizeTurns(scopedHistory) };
     }
     if (!decision.escalate && !result.ignore && !decision.ignore && !forcedHandoffReason(text) && pendingBefore === 0) {
       await ensureHandOff(result.text, customerText, tools);
@@ -425,6 +430,12 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       escalated = false;
     }
     toolCalls = result.toolCalls;
+    const checked = replyIfInventedSku(reply, toolCalls);
+    if (checked) {
+      reply = checked;
+      escalated = false;
+      decision.reason = null;
+    }
     model = result.model;
     salesMeta = {
       producto: result.producto || null,
@@ -435,7 +446,7 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   } catch (error) {
     if (!isGreeting(text)) {
       const failed = await handleAiFailure({ phone, name: displayName, text, error, notify, productContext, resume });
-      return { ...failed, tools };
+      return { ...failed, tools, timings: closeTimings(), summary: summarizeTurns(scopedHistory) };
     }
     logError(`[${phone}] Gemini falló (${error.kind ?? 'unknown'} ${error.status ?? ''}); se respondió el saludo sin IA.`);
     reply = greetingReply(text, isNewConversation);
@@ -445,8 +456,10 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     reply = `${RESUME_NOTE}\n\n${reply}`;
   }
 
-  if (reply && !escalated && shouldAuditReply(reply, tools?.state)) {
-    const orderContext = renderOrderContext(phone, bcv);
+  if (lightTurn) {
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
+  } else if (reply && !escalated && shouldAuditReply(reply, tools?.state, productContext)) {
+    const orderContext = await renderOrderContext(phone, bcv);
     const audited = await runAuditor({
       phone,
       mensaje_cliente: customerText,
@@ -456,6 +469,9 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
       resume,
     });
     if (audited) reply = audited;
+    lap('auditor', mark);
+  } else if (!lightTurn) {
+    timings.push({ step: 'auditor', ms: 0, skipped: true });
   }
 
   return {
@@ -470,15 +486,20 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     sku: salesMeta?.sku ?? null,
     motivo: salesMeta?.motivo ?? null,
     confianza: salesMeta?.confianza ?? null,
+    timings: closeTimings(),
+    summary: summarizeTurns(scopedHistory),
   };
 }
 
 /** No auditar plantillas del sistema (boleta, dirección, fallas) ni mensajes vacíos. */
-function shouldAuditReply(reply, state = {}) {
+function shouldAuditReply(reply, state = {}, productContext = '') {
   if (!config.auditor.enabled) return false;
   if (!reply || FAILURE_REPLY_RE.test(reply)) return false;
   if (state.boleta || state.addressSaved) return false;
-  return true;
+  const amounts = String(reply).match(/\d+[.,]\d{2}/g) || [];
+  if (!amounts.length) return false;
+  // Si el monto ya salió de la base, no hace falta una segunda llamada al modelo.
+  return amounts.some((amount) => !productContext.includes(amount) && !productContext.includes(amount.replace(',', '.')));
 }
 
 /**
@@ -514,7 +535,7 @@ async function runAuditor({ phone, mensaje_cliente, datos_bd, borrador_barbara, 
 
 async function finishReply({ phone, displayName, text, notify, outcome }) {
   let { reply, escalated, tools } = outcome;
-  const order = db.getActiveOrder(phone);
+  const order = await db.getActiveOrder(phone);
   const kind = physicalTicketKind({ reply, tools });
 
   // Solo excepciones físicas → ficha telegráfica + botones 1-tap. El cliente ya recibió tono de mostrador.
@@ -569,7 +590,7 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     sku: outcome.sku || null,
     motivo: outcome.motivo || 'Escalado a especialista',
     confianza: outcome.confianza,
-    summary: conversationSummary(phone),
+    summary: outcome.summary || '',
   } : null;
 
   return {
@@ -581,6 +602,8 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     productContext: outcome.productContext,
     toolCalls: outcome.toolCalls,
     model: outcome.model,
+    confianza: outcome.confianza ?? null,
+    timings: outcome.timings || [],
   };
 }
 
@@ -594,7 +617,10 @@ export async function completeCustomerTurn(phone, result) {
     if (result.historyText?.includes(CANCEL_MARKER) && !stored.includes(CANCEL_MARKER)) {
       stored = `${stored}\n${CANCEL_MARKER}`;
     }
-    db.addMessage(phone, 'model', stored);
+    await db.addMessage(phone, 'model', stored, null, {
+      confidence: result.confianza,
+      raw: result.handoff ? { producto: result.handoff.producto, motivo: result.handoff.motivo } : null,
+    });
   }
   if (result?.escalated && result.handoff) {
     await finalizeHandoff({ phone, name: result.handoff.name, handoff: result.handoff });
@@ -604,7 +630,7 @@ export async function completeCustomerTurn(phone, result) {
 
 /** Deja el chat en SPECIALIST y avisa al asesor con el resumen del caso. */
 export async function finalizeHandoff({ phone, name, handoff, notify = notifyAdvisor }) {
-  db.setSpecialist(phone);
+  await db.setSpecialist(phone);
   const body = [
     `Cliente: ${name || 'Sin nombre'} (+${phone})`,
     `Producto tentativo: ${handoff?.producto || 'no identificado'}${handoff?.sku ? ` · SKU ${handoff.sku}` : ''}`,
@@ -699,7 +725,7 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
   if (!resume && error.retryable) setTimeout(() => resumeOne(phone).catch((err) => logError(`[${phone}]`, err.message)), 45_000);
 
   if (config.pauseOnError) {
-    db.setSpecialist(phone);
+    await db.setSpecialist(phone);
     await notify(`Cliente: ${name || 'Sin nombre'} (+${phone})\nÚltimo mensaje: "${text}"\n\n⚠️ Motivo: error técnico de la IA. ${error.hint ?? ''}`, {
       kind: 'tech', phone, title: 'Falla técnica', whatsapp: false,
     });
@@ -713,7 +739,7 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
       { kind: 'tech', phone, title: 'Bárbara no pudo responder', whatsapp: false },
     );
   }
-  if (resume && FAILURE_REPLY_RE.test(db.getLatestMessage(phone)?.content ?? '')) {
+  if (resume && FAILURE_REPLY_RE.test(await db.getLatestMessage(phone)?.content ?? '')) {
     return { reply: null, escalated: false, paused: false, productContext, error };
   }
   return { reply: RETRY_LATER_REPLY, escalated: false, paused: false, productContext, error };
@@ -734,22 +760,22 @@ function resumeOne(phone) {
 }
 
 async function resumeOneNow(phone) {
-  const latest = db.getLatestMessage(phone);
+  const latest = await db.getLatestMessage(phone);
   if (!needsResume(latest) || Date.now() - latest.created_at > catchupMs()) return;
 
-  let chat = db.getChat(phone);
+  let chat = await db.getChat(phone);
   if (chat?.paused) {
     if (!isPauseExpired(chat)) return;
-    db.resumeChat(phone);
-    chat = db.getChat(phone);
+    await db.resumeChat(phone);
+    chat = await db.getChat(phone);
   }
 
-  const history = db.getHistory(phone).filter((m) => !FAILURE_REPLY_RE.test(m.content));
+  const history = (await db.getHistory(phone, config.historyLimit, config.newConversationHours)).filter((m) => !FAILURE_REPLY_RE.test(m.content));
   const text = pendingCustomerText(history);
   if (!text.trim()) return;
-  const lastReplyAt = db.getLastModelMessageAt(phone);
+  const lastReplyAt = await db.getLastModelMessageAt(phone);
   const isNewConversation = !lastReplyAt || Date.now() - lastReplyAt > config.newConversationHours * 3600 * 1000;
-  if (isNewConversation) resetCustomerOrderSession(phone, { quiet: true });
+  if (isNewConversation) await resetCustomerOrderSession(phone, { quiet: true });
   const outcome = await produceReply({
     phone, displayName: chat?.name, text, history, isNewConversation, notify: notifyAdvisor, resume: true,
   });
@@ -764,7 +790,7 @@ export async function resumePendingConversations() {
   if (resumeRunning) return;
   resumeRunning = true;
   try {
-    const pending = db.listLatestMessagesSince(Date.now() - catchupMs()).filter(needsResume);
+    const pending = (await db.listLatestMessagesSince(Date.now() - catchupMs())).filter(needsResume);
     if (pending.length) info(`Retomando ${pending.length} conversación(es) pendiente(s) de la última hora.`);
     for (const row of pending) await resumeOne(row.phone);
   } finally {
@@ -782,7 +808,7 @@ export function startResumeLoop() {
 }
 
 /** Registra en el historial un mensaje que un asesor envió manualmente al cliente. */
-export function recordAdvisorMessage(phone, text) {
-  db.upsertChat(phone, null);
-  db.addMessage(phone, 'model', text);
+export async function recordAdvisorMessage(phone, text) {
+  await db.upsertChat(phone, null);
+  await db.addMessage(phone, 'model', text);
 }

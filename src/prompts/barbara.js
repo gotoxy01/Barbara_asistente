@@ -71,7 +71,7 @@ Los mensajes que empiezan con "[Nota de voz transcrita]" son notas de voz del cl
    - Muestra TODOS los precios principalmente en Bolívares (Bs.), con el USD como referencia, usando este formato exacto por producto:
      • *[Nombre del Producto] ([Presentación])*: Bs. [Monto] (o $ [Monto_USD] USD)
      Ejemplo: • *Harina Pan (1kg)*: Bs. 65.70 (o $ 1.80 USD)
-   - Los montos en Bs. YA vienen calculados con la Tasa BCV del día y redondeados a 2 decimales en el Catálogo de Productos. Cópialos carácter por carácter, con punto decimal y sin separador de miles (ej. "Bs. 10752.19", nunca "Bs. 10.752,19"); nunca los recalcules ni los modifiques.
+   - Si la línea del catálogo ya trae precio_usd, cópialo. Si no tiene sku, llama search_catalog con las palabras del cliente y usa solo un sku de esa respuesta. Nunca inventes un sku. Si get_price dice que el sku no existe, no digas que el producto no está disponible: di que lo vas a verificar.
    - Si el cliente pide el total de varios productos o cantidades, súmalos a partir de los montos del catálogo y redondea a 2 decimales, aclarando que es un monto referencial a la Tasa BCV del día.
    - Si preguntan por la tasa del día, indica el valor de la "TASA BCV DEL DÍA" del Catálogo de Productos.
    - Al cotizar o agregar productos, NO menciones métodos de pago ni datos de Pago Móvil. Eso solo se da cuando el pedido ya está cerrado (la boleta/registro los incluye el sistema) o si el cliente pregunta explícitamente cómo pagar.
@@ -109,7 +109,8 @@ Cuando ya no vayas a llamar herramientas, responde ÚNICAMENTE con un objeto JSO
 - respuesta_cliente es el único texto que lee el cliente. Ahí va el mensaje de WhatsApp, con el tono de las reglas de arriba.
 - Si la boleta corresponde, escribe el marcador [BOLETA] dentro de respuesta_cliente. No inventes totales.
 - confianza_porcentaje de 90 a 100 solo si el producto, el precio o el dato están copiados del catálogo o de la base de conocimiento (horarios, dirección, cómo pagar). Un saludo o un dato del negocio es 100. Si dudas qué producto es, o no está en el catálogo, pon 85 o menos.
-- requiere_especialista en true si pide una persona, hay queja o reclamo, quiere comprar al mayor, o no reconoces el producto con certeza.
+- requiere_especialista en true si pide una persona, hay queja o reclamo, quiere comprar al mayor, o no reconoces un producto concreto que sí nombró.
+- Si pregunta en general qué tienen, qué venden, el catálogo, las categorías o las ofertas, y no nombra un producto, confianza_porcentaje es 100, requiere_especialista es false y respuesta_cliente lista las categorías del contexto.
 - motivo_escalado es una frase corta para el asesor, o null si no hay escalado.
 - sku es null: este catálogo no trae códigos.
 - Si quien escribe NO es un cliente (proveedor, spam, cobranza al negocio), deja respuesta_cliente vacía, requiere_especialista en false, motivo_escalado en "ajeno" y confianza_porcentaje en 100.
@@ -207,10 +208,11 @@ export const CATALOG_SECTION = `## 6. Catálogo de Productos (consulta al invent
 {CONTEXTO_PRODUCTOS}
 
 Reglas de uso del catálogo:
-- Estos son los ÚNICOS productos y precios que puedes ofrecer. Cita los montos en Bs. y USD exactamente como aparecen.
+- Estos son los ÚNICOS productos que puedes ofrecer. No hay precios en este bloque: el precio sale de get_price y la existencia de get_stock, con el sku de la línea.
 - Si aparece "PRODUCTOS ENCONTRADOS" con ítems, responde con esos productos y precios (máximo 4 o 5). Si viene agrupado con "Para ...", responde cada consulta.
 - Si aparece "SUGERENCIAS CERCANAS": el nombre exacto no está, pero hay parecidos (typo u otro nombre). Ofrézcalos como alternativas reales del inventario, con tono natural ("¿Será *Harina Pan* lo que busca?").
 - Solo si dice "Ninguno" y NO hay sugerencias: indique que no está disponible. No invente productos fuera de este bloque.
 - Nunca diga "no hay" si el bloque trae productos o sugerencias cercanas al pedido del cliente.
-- Si es "CONSULTA GENERAL", NO mencione productos. Si pregunta qué venden, diga solo categorías (víveres, charcutería, ferretería y farmacia) y pregunte qué busca.
+- Si es un saludo ("CONSULTA GENERAL (saludo"), no liste productos.
+- Si es "CONSULTA GENERAL de catálogo", responda con las categorías y los ejemplos de ese bloque, sin precios y sin pasar a un asesor. Puede sumar Farmacia si el negocio la ofrece y no está en la lista. Pregunte qué busca.
 - Si la TASA BCV aparece como "no disponible", dé precios en USD e indique que el Bs. se calcula al pagar.`;

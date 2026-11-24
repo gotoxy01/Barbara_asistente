@@ -19,7 +19,7 @@ export const config = {
     // false por defecto: la consola no se llena con cada mensaje de WhatsApp.
     debug: /^(1|true|si|sí|yes)$/i.test(process.env.WWEB_DEBUG || 'false'),
     // Grupos donde Bárbara atiende a quien escribe, pero siempre respondiéndole por privado.
-    groupNames: (process.env.WWEB_GROUPS ?? 'Bodega los cuchos').split(',').map((g) => g.trim()).filter(Boolean),
+    groupNames: (process.env.WWEB_GROUPS ?? '').split(',').map((g) => g.trim()).filter(Boolean),
   },
   // true = imprime cada Cliente / Bárbara respondió (útil para depurar).
   logVerbose: /^(1|true|si|sí|yes)$/i.test(process.env.LOG_VERBOSE || 'false'),
@@ -39,16 +39,20 @@ export const config = {
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || '',
-    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
     // Reintentos solo para fallas pasajeras (429 por ráfaga, 5xx, tiempo agotado).
-    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 4),
+    maxRetries: Number(process.env.GEMINI_MAX_RETRIES ?? 2),
     // Tope de espera reintentando un mismo mensaje.
-    retryBudgetMs: Number(process.env.GEMINI_RETRY_BUDGET_MS || 45000),
+    retryBudgetMs: Number(process.env.GEMINI_RETRY_BUDGET_MS || 15000),
     // Cuántos clientes puede atender Gemini a la vez. Más de esto satura el modelo y Google responde 503.
     concurrency: Number(process.env.GEMINI_CONCURRENCY || 2),
     // Modelo que se usa si el principal está saturado (503) o no responde a tiempo. Vacío = sin respaldo.
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-2.5-flash',
-    timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 20000),
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL ?? 'gemini-flash-latest',
+    stableModels: (process.env.GEMINI_STABLE_MODELS || 'gemini-3.5-flash,gemini-flash-latest')
+      .split(',').map((name) => name.trim()).filter(Boolean),
+    timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 12000),
+    // Tope de la respuesta. El razonamiento largo de Gemini 3 se recorta aparte (thinking mínimo).
+    maxOutputTokens: Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 512),
   },
   // Segunda pasada: revisa precios/cálculos del borrador antes de WhatsApp. AUDITOR_ENABLED=false para desactivar.
   auditor: {
@@ -79,6 +83,17 @@ export const config = {
   orderMemoryHours: Number(process.env.ORDER_MEMORY_HOURS || 24),
   timezone: process.env.TIMEZONE || 'America/Caracas',
   dbPath: process.env.DB_PATH || 'barbara.db',
+  databaseUrl: process.env.DATABASE_URL || '',
+  postgresAdminUrl: process.env.POSTGRES_ADMIN_URL || '',
+  redisUrl: process.env.REDIS_URL || '',
+  embedding: {
+    model: process.env.EMBEDDING_MODEL || 'gemini-embedding-001',
+    dimensions: Number(process.env.EMBEDDING_DIMENSIONS || 768),
+  },
+  hybrid: {
+    keywordWeight: Number(process.env.HYBRID_KEYWORD_WEIGHT || 0.55),
+    vectorWeight: Number(process.env.HYBRID_VECTOR_WEIGHT || 0.45),
+  },
   delivery: {
     // Artículo del sistema de caja cuyo precio es el costo del delivery (uno por pedido)
     itemName: process.env.DELIVERY_ITEM_NAME || 'Delivery costo',
@@ -124,6 +139,10 @@ export function assertGeminiConfig() {
 }
 
 /** Datos del negocio que no pueden quedar escritos en el código. */
+export function assertDatabaseConfig() {
+  required('DATABASE_URL');
+}
+
 export function assertBusinessConfig() {
   required('PAGO_MOVIL_TELEFONO');
   required('PAGO_MOVIL_CEDULA');
