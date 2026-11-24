@@ -3,7 +3,7 @@
 import { config } from './config.js';
 import * as db from './db.js';
 import { isWithinServiceWindow } from './services/window.js';
-import { isServiceWindowError, sendTemplate } from './whatsapp.js';
+import { isServiceWindowError, sendInteractiveList, sendTemplate } from './whatsapp.js';
 
 let sender = null;
 let interactiveSender = null;
@@ -91,6 +91,26 @@ export async function sendMessage(phone, text) {
  * @param {string} phone
  * @param {{ bodyText: string, buttons: { id: string, title: string }[], footer?: string }} payload
  */
+/** Menú de botones o lista. Fuera de las 24 h solo se puede la plantilla. */
+export async function sendMenu(phone, menu) {
+  if (!menu?.options?.length) return { mode: 'text' };
+  if (channel === 'cloud' && !await freeTextAllowed(phone)) {
+    return sendApprovedTemplate(phone, 'Menú fuera de la ventana de 24 h.');
+  }
+  if (channel === 'cloud' && menu.kind === 'list') {
+    await sendInteractiveList(phone, {
+      bodyText: menu.body,
+      rows: menu.options,
+    });
+    return { mode: 'list' };
+  }
+  if (channel === 'cloud' && menu.kind === 'buttons' && interactiveSender) {
+    await interactiveSender(phone, { bodyText: menu.body, buttons: menu.options });
+    return { mode: 'buttons' };
+  }
+  return { mode: 'text' };
+}
+
 export async function sendInteractiveButtons(phone, payload) {
   if (interactiveSender) {
     await interactiveSender(phone, payload);

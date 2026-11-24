@@ -107,6 +107,7 @@ while (true) {
   }
   const steps = formatTimings(result.timings);
   if (steps) console.log(`  Tiempos: ${steps}`);
+  if (result.menu) console.log('  (Menú: responda con el número. En WhatsApp salen botones o lista.)');
   if (result.reply) {
     console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
     await addMessage(phone, 'model', result.historyText || result.reply);

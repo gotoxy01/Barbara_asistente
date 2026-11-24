@@ -1,7 +1,7 @@
 import { config } from '../config.js';
 import * as db from '../db.js';
 import { info, verbose, error as logError } from '../log.js';
-import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
+import { getChannel, getSelfPhone, outboundRecord, sendMenu, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
 import { STOCK_CHECK_REPLY, historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
@@ -11,6 +11,8 @@ import { catalogCustomerReply, catalogOverviewText, searchProducts } from './cat
 import { isOperationalTurn } from './orderLifecycle.js';
 import { loadProfileSummary } from './orderBook.js';
 import { tryOperationalTurn } from './operationalTurn.js';
+import { openMainMenu, rememberMenu, takeMenuTurn } from './menuFlow.js';
+import { renderMenuText } from '../menus.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
@@ -419,11 +421,31 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   };
   let mark = turnStarted;
   const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  const menuTurn = await takeMenuTurn(phone, text);
+  if (menuTurn?.reply) {
+    timings.push({ step: 'menú', ms: Date.now() - turnStarted });
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    return {
+      reply: menuTurn.reply,
+      menu: menuTurn.menu || null,
+      escalated: Boolean(menuTurn.escalated),
+      paused: false,
+      productContext: 'Menú, sin modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+      motivo: menuTurn.escalated ? 'El cliente pidió un asesor' : null,
+    };
+  }
   if (isOnlyGreetingOrControl(text) || isGreeting(text)) {
+    const opened = openMainMenu();
+    const greet = greetingReply(text, isNewConversation, displayName);
+    opened.menu = { ...opened.menu, body: `${greet}\n\n${opened.menu.body}` };
+    rememberMenu(phone, opened);
     timings.push({ step: 'Gemini', ms: 0, skipped: true });
     timings.push({ step: 'auditor', ms: 0, skipped: true });
     return {
-      reply: greetingReply(text, isNewConversation, displayName),
+      reply: renderMenuText(opened.menu),
+      menu: opened.menu,
       escalated: false,
       paused: false,
       productContext: 'Saludo, sin modelo.',
@@ -712,6 +734,7 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     model: outcome.model,
     confianza: outcome.confianza ?? null,
     timings: outcome.timings || [],
+    menu: outcome.menu || null,
   };
 }
 
@@ -719,8 +742,13 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
  * Envía la respuesta y, solo si WhatsApp la acepta, la guarda y aplica el pase a especialista.
  */
 export async function completeCustomerTurn(phone, result) {
+  if (result?.menu && getChannel() === 'cloud') {
+    await sendMenu(phone, result.menu);
+  }
   if (result?.reply) {
-    const sent = await sendMessage(phone, result.reply);
+    const sent = result?.menu && getChannel() === 'cloud'
+      ? { mode: 'text' }
+      : await sendMessage(phone, result.reply);
     let stored = outboundRecord(sent, result.historyText || result.reply);
     if (result.historyText?.includes(CANCEL_MARKER) && !stored.includes(CANCEL_MARKER)) {
       stored = `${stored}\n${CANCEL_MARKER}`;

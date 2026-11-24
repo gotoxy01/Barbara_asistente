@@ -71,6 +71,32 @@ export function sendInteractiveButtons(to, { bodyText, buttons, footer }) {
   });
 }
 
+/**
+ * Lista interactiva. Máximo 10 filas; título ≤24; descripción ≤72.
+ * @param {string} to
+ * @param {{ bodyText: string, buttonText?: string, rows: { id: string, title: string, description?: string }[] }} opts
+ */
+export function sendInteractiveList(to, { bodyText, buttonText = 'Ver opciones', rows }) {
+  const mapped = (rows || []).slice(0, 10).map((row) => ({
+    id: String(row.id).slice(0, 200),
+    title: String(row.title).slice(0, 24),
+    ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
+  }));
+  return post('messages', {
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: String(bodyText || '').slice(0, 1024) },
+      action: {
+        button: String(buttonText).slice(0, 20),
+        sections: [{ title: 'Opciones', rows: mapped }],
+      },
+    },
+  });
+}
+
 /** Plantilla preaprobada. Es el único envío permitido fuera de la ventana de 24 h. */
 export function sendTemplate(to, name = config.whatsapp.templateName, lang = config.whatsapp.templateLang) {
   if (!name) throw new Error('Falta WHATSAPP_TEMPLATE_NAME para escribir fuera de la ventana de 24 h');

@@ -15,6 +15,8 @@ import { startCatalogSync } from './services/productSync.js';
 import { completeCustomerTurn, handleCustomerMessage, startResumeLoop } from './services/chatService.js';
 import { voiceNoteToText } from './services/mediaService.js';
 import { tryHandleOperatorInbound } from './services/operatorConsoleService.js';
+import { parseInteractive } from './menus.js';
+import { parseAdvisorId } from './services/menuFlow.js';
 import {
   downloadMedia,
   isValidSignature,
@@ -110,7 +112,10 @@ async function messageToText(message) {
     case 'button':
       return message.button?.text ?? '';
     case 'interactive':
-      return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? '';
+      return parseInteractive(message)?.id
+        || message.interactive?.button_reply?.title
+        || message.interactive?.list_reply?.title
+        || '';
     default:
       return null;
   }
@@ -119,7 +124,20 @@ async function messageToText(message) {
 async function processAdvisor(message, name) {
   try {
     markAsRead(message.id).catch(() => {});
-    const buttonId = message.interactive?.button_reply?.id || message.button?.payload || null;
+    const buttonId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || message.button?.payload || null;
+    const advisorTap = parseAdvisorId(buttonId);
+    if (advisorTap?.command === 'pagado' || advisorTap?.command === 'rechazar') {
+      await handleAdvisorCommand(`#${advisorTap.command} ${advisorTap.orderId}`);
+      await db.markProcessed(message.id);
+      return;
+    }
+    if (advisorTap?.command === 'hay' || advisorTap?.command === 'nohay') {
+      await handleAdvisorCommand(advisorTap.command === 'hay'
+        ? `#hay ${advisorTap.orderId}`
+        : `#nohay ${advisorTap.orderId}`);
+      await db.markProcessed(message.id);
+      return;
+    }
     const text = message.type === 'text'
       ? (message.text?.body ?? '')
       : (message.interactive?.button_reply?.title ?? message.button?.text ?? '');

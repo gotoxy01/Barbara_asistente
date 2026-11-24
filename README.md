@@ -97,7 +97,15 @@ npm test
 
 `npm run chat` no espera los 3,5 s con los que WhatsApp junta mensajes seguidos, e imprime el tiempo de cada paso (tasa, catálogo, modelo). `--nuevo`, o el comando `borrar` dentro del chat, limpia la conversación del cliente de prueba para que no quede una respuesta vieja.
 
-## 4.1 Pedido, pago y entrega
+## 4.1 Menús de WhatsApp
+
+Dentro de las 24 horas, Bárbara puede mandar botones (hasta 3) o una lista (hasta 10). El cliente toca una opción y el programa la entiende por el id, sin llamar al modelo. Si escribe el número de la última lista (`1`, `2`…), es lo mismo. El texto libre sigue funcionando.
+
+Los rótulos están en `src/menus.js`. En `npm run chat` cada menú se ve numerado, con el id entre corchetes.
+
+Al asesor le llegan botones `Pago verificado` / `Rechazar` y `Hay` / `No hay`. Equivalen a `#pagado`, `#rechazar`, `#hay` y `#nohay`.
+
+## 4.2 Pedido, pago y entrega
 
 El pedido se guarda en Postgres desde el primer producto. No depende del chat ni de la memoria del proceso.
 
