@@ -55,4 +55,10 @@ export {
   saveProductEmbedding,
   searchByVector,
   deactivateMissingSkus,
+  countUserMessagesSince,
+  recentUserMessages,
+  getChatBlock,
+  saveChatBlock,
+  clearChatBlock,
+  listChatBlocks,
 } from './db/repo.js';

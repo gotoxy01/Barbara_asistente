@@ -620,6 +620,40 @@ function matchQuery(query, products) {
   return { terms: terms.map((t) => t.word), matches, missing };
 }
 
+export function splitShoppingClauses(text) {
+  return String(text || '')
+    .split(/\n+|[,;]|\s+\by\b\s+/i)
+    .map((part) => part.replace(/^(quiero|deme|dame|necesito|también|tambien|ponme|anote|anota)\s+/i, '').trim())
+    .filter((part) => part.length > 1);
+}
+
+function leadingQty(text) {
+  const match = String(text).match(/^(\d{1,2})\s*(?:x|de)?\s+(.+)$/i);
+  if (!match) return { qty: 1, text: String(text).trim() };
+  const rest = match[2].trim();
+  if (!rest || /^\d/.test(rest)) return { qty: 1, text: String(text).trim() };
+  return { qty: Number(match[1]), text: rest };
+}
+
+/** Parte un mensaje en productos y usa la misma búsqueda del catálogo para cada uno. */
+export function lookupShopping(text, products) {
+  const clauses = splitShoppingClauses(text);
+  const parts = clauses.length ? clauses : [String(text || '').trim()].filter(Boolean);
+  return parts.map((raw) => {
+    const { qty, text: query } = leadingQty(raw);
+    let matches = [];
+    try {
+      matches = matchQuery(query, products || []).matches || [];
+    } catch {
+      matches = [];
+    }
+    if (!matches.length) {
+      try { matches = softSuggest(query, products || [], 5); } catch { matches = []; }
+    }
+    return { query, qty, matches, missing: matches.length ? [] : [query] };
+  });
+}
+
 /**
  * Identifica UN producto a partir del nombre que usa la IA o el cliente (idealmente "Nombre (Presentación)").
  * @returns {{ product?: Product, options?: Product[] }} product si es inequívoco; options si hay varios candidatos

@@ -75,6 +75,11 @@ export const config = {
   pauseHours: Number(process.env.BOT_PAUSE_HOURS || 12),
   confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 85),
   debounceWindowMs: Number(process.env.DEBOUNCE_WINDOW_MS ?? 3500),
+  flood: {
+    perMinute: Number(process.env.MAX_MENSAJES_POR_MINUTO ?? 10),
+    perDay: Number(process.env.MAX_MENSAJES_POR_DIA ?? 150),
+    blockMinutes: Number(process.env.BLOQUEO_MINUTOS ?? 30),
+  },
   serviceWindowHours: Number(process.env.SERVICE_WINDOW_HOURS ?? 24),
   // Si es false, un error técnico de Gemini NO pausa el chat (el cliente puede reintentar)
   pauseOnError: /^(1|true|si|sí)$/i.test(process.env.PAUSE_ON_ERROR || 'false'),

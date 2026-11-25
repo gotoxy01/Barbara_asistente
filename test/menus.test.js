@@ -91,12 +91,36 @@ describe('menús de WhatsApp', () => {
     assert.equal(seen.filter((step) => step.text.includes('¿Cómo lo entregamos?')).length, 1);
   });
 
-  it('se puede cerrar o volver desde las categorías, y modificar reemplaza la cantidad', () => {
-    const cats = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:productos', { products, rate, order: { items: [] } });
-    assert.ok(cats.menu.options.some((row) => row.id === 'menu:todo'));
-    assert.ok(cats.menu.options.some((row) => row.id === 'menu:buscar'));
-    assert.ok(cats.menu.options.some((row) => row.title.includes('Volver')));
-    assert.equal((cats.text.match(/Elija una/gi) || []).length, 1);
+  it('pedir busca por nombre, mi pedido no cobra antes de la boleta, y modificar reemplaza', () => {
+    const opened = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:pedido', { products, rate, order: { items: [] } });
+    assert.match(opened.text, /víveres/i);
+    assert.match(opened.text, /varios a la vez/i);
+    assert.equal(opened.session.awaiting, 'buscar');
+    assert.equal(opened.menu.options.some((row) => String(row.id).startsWith('menu:page')), false);
+    assert.equal(opened.menu.options.some((row) => String(row.id).startsWith('menu:cat')), false);
+    assert.equal((opened.text.match(/Puede escribir varios/gi) || []).length, 1);
+
+    const draft = { items: [{ sku: 'arroz', nombre: 'Arroz', presentacion: '1 kg', precio: 1.9, cantidad: 1 }], lifecycle: 'borrador', address: null };
+    const mine = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:mipedido', { products, rate, order: draft });
+    assert.equal(mine.menu.options.some((row) => row.id === 'menu:pague'), false);
+    assert.ok(mine.menu.options.some((row) => row.id === 'menu:pedido'));
+    assert.ok(mine.menu.options.some((row) => row.title.includes('Volver')));
+    const tooSoon = reduceMenu(mine.session, 'menu:pague', { products, rate, order: mine.order });
+    assert.notEqual(tooSoon.session.awaiting, 'referencia');
+
+    const closed = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:retiro', { products, rate, order: draft });
+    assert.equal(closed.order.lifecycle, 'boleta_enviada');
+    assert.ok(closed.menu.options.some((row) => row.id === 'menu:pague'));
+
+    const several = reduceMenu({ awaiting: 'buscar', menu: null }, 'aceite, azúcar', { products, rate, order: { items: [] } });
+    assert.equal(several.order.items.length, 2);
+    assert.match(several.text, /Aceite/);
+    assert.match(several.text, /Azúcar/);
+    assert.equal((several.text.match(/¿Busca otra cosa o ya es todo\?/g) || []).length, 1);
+
+    const missing = reduceMenu({ awaiting: 'buscar', menu: null }, 'qqqqzzzz-no-existe', { products, rate, order: { items: [] } });
+    assert.match(missing.text, /verificando si lo tenemos/i);
+    assert.ok(missing.stockCheck?.length);
 
     const harina = { sku: 'harina-ama', nombre: 'Harina PAN amarilla', presentacion: '1 kg', precio: 1.8, categoria: 'Víveres' };
     let order = { items: [{ ...harina, cantidad: 1 }], address: null };

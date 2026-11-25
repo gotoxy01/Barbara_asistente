@@ -888,6 +888,86 @@ export async function searchByVector(vector, limit = 30) {
   return rows.map((row) => ({ sku: row.sku, vector: Number(row.similarity) }));
 }
 
+export async function countUserMessagesSince(phone, sinceMs) {
+  const { rows } = await query(`
+    SELECT COUNT(*)::int AS n
+    FROM messages m
+    JOIN conversations conv ON conv.id = m.conversation_id
+    JOIN contacts c ON c.id = conv.contact_id
+    WHERE c.wa_id = $1 AND m.sender_type = 'USER' AND m.created_at >= to_timestamp($2 / 1000.0)
+  `, [phone, sinceMs]);
+  return Number(rows[0]?.n || 0);
+}
+
+export async function recentUserMessages(phone, limit = 2) {
+  const { rows } = await query(`
+    SELECT m.content, ${ms('m.created_at')} AS created_at
+    FROM messages m
+    JOIN conversations conv ON conv.id = m.conversation_id
+    JOIN contacts c ON c.id = conv.contact_id
+    WHERE c.wa_id = $1 AND m.sender_type = 'USER'
+    ORDER BY m.created_at DESC, m.seq DESC
+    LIMIT $2
+  `, [phone, limit]);
+  return rows.map((row) => ({ content: row.content, created_at: Number(row.created_at) }));
+}
+
+export async function getChatBlock(phone) {
+  const { rows } = await query(`
+    SELECT reason,
+           ${ms('blocked_until')} AS blocked_until,
+           ${ms('warned_at')} AS warned_at,
+           ${ms('notified_at')} AS notified_at
+    FROM chat_blocks WHERE wa_id = $1
+  `, [phone]);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    reason: row.reason,
+    blockedUntil: row.blocked_until == null ? null : Number(row.blocked_until),
+    warnedAt: row.warned_at == null ? null : Number(row.warned_at),
+    notifiedAt: row.notified_at == null ? null : Number(row.notified_at),
+  };
+}
+
+export async function saveChatBlock(phone, { blockedUntil = null, warnedAt = null, notifiedAt = null, reason = null } = {}) {
+  await query(`
+    INSERT INTO chat_blocks (wa_id, blocked_until, warned_at, notified_at, reason, updated_at)
+    VALUES (
+      $1,
+      CASE WHEN $2::bigint IS NULL THEN NULL ELSE to_timestamp($2 / 1000.0) END,
+      CASE WHEN $3::bigint IS NULL THEN NULL ELSE to_timestamp($3 / 1000.0) END,
+      CASE WHEN $4::bigint IS NULL THEN NULL ELSE to_timestamp($4 / 1000.0) END,
+      $5,
+      NOW()
+    )
+    ON CONFLICT (wa_id) DO UPDATE SET
+      blocked_until = EXCLUDED.blocked_until,
+      warned_at = COALESCE(EXCLUDED.warned_at, chat_blocks.warned_at),
+      notified_at = COALESCE(EXCLUDED.notified_at, chat_blocks.notified_at),
+      reason = EXCLUDED.reason,
+      updated_at = NOW()
+  `, [phone, blockedUntil, warnedAt, notifiedAt, reason]);
+}
+
+export async function clearChatBlock(phone) {
+  await query('DELETE FROM chat_blocks WHERE wa_id = $1', [phone]);
+}
+
+export async function listChatBlocks(now = Date.now()) {
+  const { rows } = await query(`
+    SELECT wa_id, reason, ${ms('blocked_until')} AS blocked_until
+    FROM chat_blocks
+    WHERE reason = 'manual' OR blocked_until > to_timestamp($1 / 1000.0)
+    ORDER BY updated_at DESC
+  `, [now]);
+  return rows.map((row) => ({
+    phone: row.wa_id,
+    reason: row.reason,
+    blockedUntil: row.blocked_until == null ? null : Number(row.blocked_until),
+  }));
+}
+
 export async function deactivateMissingSkus(skus) {
   if (!skus.length) return;
   await query(`

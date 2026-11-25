@@ -38,7 +38,7 @@ console.log('Chat de prueba con Bárbara (cliente: ' + name + ', +' + phone + ')
 console.log('Sin la espera de 3,5 s de WhatsApp: aquí cada mensaje se responde al momento.');
 console.log('Escriba "salir" para terminar, "borrar" para limpiar el hilo, o "reanudar" / "#reanudar" si quedó con el especialista.');
 console.log('Ubicación de prueba: /ubicacion 10.4806,-66.9036');
-console.log('Como asesor: !pagado <pedido> o !rechazar <pedido> (no confirma el pago hasta ese paso).\n');
+console.log('Como asesor: !pagado <pedido>, !rechazar <pedido>, !bloquear o !desbloquear.\n');
 const openOrders = await reloadOpenOrders();
 console.log(`Pedidos abiertos recuperados: ${openOrders.length}.`);
 
@@ -62,6 +62,14 @@ while (true) {
   if (command === 'borrar' || command === 'nuevo') {
     const removed = await clearCustomerThread(phone);
     console.log(`Listo: se borraron ${removed} mensajes de +${phone}. La próxima pregunta no ve el historial anterior.\n`);
+    continue;
+  }
+  if (/^!(bloquear|desbloquear)\b/i.test(text)) {
+    const { handleAdvisorCommand } = await import('../src/services/advisorCommands.js');
+    const body = text.replace(/^!/, '#');
+    const command = /^!(bloquear|desbloquear)\s*$/i.test(text) ? `${body} ${phone}` : body;
+    await handleAdvisorCommand(command);
+    console.log('Listo.\n');
     continue;
   }
   if (text.startsWith('!pagado') || text.startsWith('!rechazar')) {

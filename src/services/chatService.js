@@ -12,6 +12,7 @@ import { isOperationalTurn } from './orderLifecycle.js';
 import { loadProfileSummary } from './orderBook.js';
 import { tryOperationalTurn } from './operationalTurn.js';
 import { openMainMenu, rememberMenu, takeMenuTurn } from './menuFlow.js';
+import { assessFlood, collapseBurst } from './floodControl.js';
 import { renderMenuText } from '../menus.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
@@ -334,7 +335,35 @@ export function handleCustomerMessage(message, options) {
   return lockPhone(message.phone, () => handleCustomerMessageNow(message, options));
 }
 
+async function judgeFlood(phone, text) {
+  const now = Date.now();
+  const block = await db.getChatBlock(phone);
+  const [countMinute, countDay, recent] = await Promise.all([
+    db.countUserMessagesSince(phone, now - 60_000),
+    db.countUserMessagesSince(phone, now - 86_400_000),
+    db.recentUserMessages(phone, 2),
+  ]);
+  const previous = recent[1];
+  return assessFlood({
+    now,
+    countMinute,
+    countDay,
+    limitPerMinute: config.flood.perMinute,
+    limitPerDay: config.flood.perDay,
+    blockMs: config.flood.blockMinutes * 60_000,
+    blockedUntil: block?.blockedUntil || null,
+    manual: block?.reason === 'manual',
+    warnedAt: block?.warnedAt || null,
+    notifiedAt: block?.notifiedAt || null,
+    text,
+    previousText: previous?.content || '',
+    previousAt: previous?.created_at || 0,
+  });
+}
+
 async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor, onWait = null } = {}) {
+  text = collapseBurst(text);
+  if (!text) return { reply: null, escalated: false, paused: false, ignored: true };
   let chat = await db.upsertChat(phone, name);
   await db.touchCustomerWindow(phone);
   chat = await db.getChat(phone);
@@ -354,6 +383,25 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     await db.addMessage(phone, 'user', text, wamid, durantePausa ? { raw: { durante_pausa: 'si' } } : {});
   }
   const displayName = chat.name || name;
+
+  const flood = await judgeFlood(phone, text);
+  if (flood.action !== 'allow') {
+    if (flood.persist) {
+      await db.saveChatBlock(phone, {
+        blockedUntil: flood.blockedUntil ?? null,
+        warnedAt: flood.warnedAt ?? null,
+        notifiedAt: flood.notify ? Date.now() : null,
+        reason: flood.reason || 'flood',
+      });
+    }
+    if (flood.notify) {
+      await notify(
+        `+${phone} mandó muchos mensajes seguidos. Quedó bloqueado ${config.flood.blockMinutes} min. Para soltarlo: #desbloquear ${phone}`,
+        { kind: 'flood', phone, title: 'Posible spam', whatsapp: true },
+      );
+    }
+    return { reply: flood.reply, escalated: false, paused: flood.action !== 'ignore', flood: true };
+  }
 
   if (chat.status === 'LOGISTICA') {
     await notify(
@@ -422,6 +470,17 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   let mark = turnStarted;
   const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
   const menuTurn = await takeMenuTurn(phone, text, null, onWait);
+  if (menuTurn?.stockCheck?.length) {
+    await notify(
+      [
+        `Verificar stock: *${menuTurn.stockCheck.join(', ')}*`,
+        `Cliente: ${displayName || 'Sin nombre'} (+${phone})`,
+        `Si lo hay: #hay ${phone} <producto> <precio USD>`,
+        `Si no lo hay: #nohay ${phone} <producto>`,
+      ].join('\n'),
+      { kind: 'weigh', phone, title: `Verificar stock: ${menuTurn.stockCheck[0]}`, whatsapp: true },
+    );
+  }
   if (menuTurn?.reply) {
     timings.push({ step: 'menú', ms: Date.now() - turnStarted });
     timings.push({ step: 'Gemini', ms: 0, skipped: true });

@@ -96,6 +96,8 @@ Comandos del asesor (al número del negocio o, en el modo QR, en Mensajes para m
 | `#r 584121234567 mensaje` | Responder al cliente |
 | `#pausar 584121234567` | Dejar el chat con el especialista |
 | `#reanudar 584121234567` | Devolver el chat a Bárbara |
+| `#bloquear 584121234567` | No responderle (spam o a mano) |
+| `#desbloquear 584121234567` | Quitar ese bloqueo |
 | `#precio 1.50` | Precio en USD de lo que se pesó |
 | `#nohay` | Avisar que no hay |
 | `#b` | Ver o borrar pedidos pendientes |
@@ -116,7 +118,9 @@ npm test
 
 ## 4.1 Menús de WhatsApp
 
-Dentro de las 24 horas, Bárbara puede mandar botones (hasta 3) o una lista (hasta 10). El cliente toca una opción y el programa la entiende por el id, sin llamar al modelo. Si escribe el número de la última lista (`1`, `2`…), es lo mismo. El texto libre sigue funcionando.
+Dentro de las 24 horas, Bárbara puede mandar botones (hasta 3) o una lista (hasta 10). El cliente toca una opción y el programa la entiende por el id, sin llamar al modelo. Si escribe el número de la última lista (`1`, `2`…), es lo mismo. Hacer pedido pide el nombre y busca en el catálogo; no pagina categorías. Puede escribir varios productos en un mensaje. Si no hay coincidencia, se verifica el stock con el vendedor.
+
+`MAX_MENSAJES_POR_MINUTO` (10), `MAX_MENSAJES_POR_DIA` (150) y `BLOQUEO_MINUTOS` (30) cortan una ráfaga: una advertencia, aviso al vendedor y silencio. Los textos idénticos se ignoran. WhatsApp ya junta lo que llega en `DEBOUNCE_WINDOW_MS` (3,5 s) y responde una sola vez.
 
 Los rótulos están en `src/menus.js`. En `npm run chat` cada menú se ve numerado, con el id entre corchetes.
 

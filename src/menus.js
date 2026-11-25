@@ -25,6 +25,8 @@ export const LABELS = {
   esTodo: 'Ya es todo',
   volver: '⬅️ Volver',
   buscar: '🔎 Buscar',
+  buscarOtra: 'Buscar otra cosa',
+  seguir: 'Seguir comprando',
   quitar: 'Quitar uno',
   delivery: 'Delivery',
   retiro: 'Retiro en tienda',
@@ -138,15 +140,72 @@ export function productMenu(products, group, page = 0, rate = 0) {
   return listMenu(page ? `Más productos de ${group}:` : `Productos de ${group}:`, rows);
 }
 
+function exampleOf(product) {
+  const first = String(product?.nombre || '').split(/\s+/)[0].toLowerCase();
+  const brand = String(product?.marca || '').replace(/\./g, '').split(/\s+/)[0].toLowerCase();
+  if (brand && brand !== first) return `${first} ${brand}`;
+  const size = String(product?.presentacion || '').toLowerCase().replace(/\s+/g, '');
+  if (/^\d/.test(size)) return `${first} ${size}`;
+  return first;
+}
+
+function joinSpanish(list) {
+  if (list.length <= 1) return list[0] || '';
+  return `${list.slice(0, -1).join(', ')} y ${list.at(-1)}`;
+}
+
+/** Un solo mensaje para pedir: categorías y ejemplos salen del catálogo real. */
+export function shoppingPrompt(products) {
+  const groups = new Map();
+  for (const product of products || []) {
+    if (!product?.categoria || product.categoria === 'politica' || product.sku === 'servicio-delivery') continue;
+    if (!groups.has(product.categoria)) groups.set(product.categoria, []);
+    groups.get(product.categoria).push(product);
+  }
+  const parts = [];
+  const examples = [];
+  for (const [category, items] of groups) {
+    const words = [];
+    for (const item of items) {
+      const word = String(item.nombre || '').split(/\s+/)[0].toLowerCase();
+      if (word && !words.includes(word)) words.push(word);
+      if (words.length === 5) break;
+    }
+    const label = category.toLowerCase();
+    parts.push(words.length ? `${label} (${words.join(', ')}…)` : label);
+    if (examples.length < 3 && items[0]) examples.push(exampleOf(items[0]));
+  }
+  const sold = parts.length ? `Vendemos ${joinSpanish(parts)}.` : 'Escriba el producto que busca.';
+  const hint = examples.length ? ` Escriba lo que necesita, por ejemplo: ${examples.join(', ')}.` : '';
+  return `${sold}${hint} Puede escribir varios a la vez.`;
+}
+
+export function searchEntryMenu(products) {
+  return buttonMenu(shoppingPrompt(products), [
+    { id: 'menu:todo', title: LABELS.esTodo },
+    { id: 'menu:mipedido', title: LABELS.miPedido },
+    { id: 'menu:back', title: 'Volver' },
+  ]);
+}
+
+export function draftOrderMenu() {
+  return listMenu('Así va su pedido. ¿Qué desea hacer?', [
+    { id: 'menu:pedido', title: LABELS.seguir },
+    { id: 'menu:modificar', title: 'Modificar' },
+    { id: 'menu:todo', title: LABELS.esTodo },
+    { id: 'menu:back', title: LABELS.volver },
+  ]);
+}
+
 export function matchMenu(products, rate = 0) {
-  const all = products || [];
-  const rows = all.slice(0, LIMITS.maxRows - 2).map((product) => ({
+  const rows = (products || []).slice(0, 8).map((product) => ({
     id: `menu:sku:${product.sku}`,
     title: product.nombre,
     description: `${product.presentacion} · ${moneyLine(product.precio, rate)}`,
   }));
-  rows.push(...controls());
-  return listMenu('Encontré varias opciones. ¿Cuál desea?', rows);
+  rows.push({ id: 'menu:buscar', title: LABELS.buscarOtra });
+  rows.push({ id: 'menu:todo', title: LABELS.esTodo });
+  return listMenu('Encontré estas opciones. ¿Cuál desea?', rows);
 }
 
 export function quantityMenu(productName) {
