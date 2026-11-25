@@ -89,7 +89,7 @@ export async function decorateNote(ticket, { previewUsd = null } = {}) {
     motivo: ticket.motivo,
     estado: ticket.estado,
     phone: ticket.clienteTelefono,
-    name: ticket.clienteNombre || await db.getChat(ticket.clienteTelefono)?.name || null,
+    name: ticket.clienteNombre || (await db.getChat(ticket.clienteTelefono))?.name || null,
     items: ticket.items || [],
     pending: pending.map((i) => ({
       detalle: i.detalle,
@@ -131,7 +131,7 @@ function itemLine(i) {
 /** Comanda de pedido cerrado → nota del bloc (P-12). */
 export async function decorateKitchenNote(order) {
   const bcv = await getBcvRate();
-  const name = await db.getChat(order.phone)?.name || null;
+  const name = (await db.getChat(order.phone))?.name || null;
   const boleta = order.items?.length ? renderBoleta(order.items, bcv) : '';
   const kitchen = kitchenOf(order);
   return {
@@ -257,7 +257,7 @@ export async function listNotes() {
 
 /** Pedidos recibidos/cancelados visibles (últimas 24 h) para el tablero principal. */
 export async function listOrderNotes() {
-  const orders = await db.listOrdersLastHours(24, 50)
+  const orders = (await db.listOrdersLastHours(24, 50))
     .filter((o) => !o.board_hidden)
     .filter((o) => o.status === 'recibido' || o.status === 'cancelado' || o.kitchen_status === 'cancelado');
   const notes = [];

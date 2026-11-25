@@ -382,7 +382,7 @@ client.on('message_create', async (msg) => {
   // (cada mensaje manual reinicia el contador) y luego se reactiva sola.
   chatIdByPhone.set(phone, msg.to);
   enqueue(phone, async () => {
-    const wasPaused = await db.getChat(phone)?.paused === 1;
+    const wasPaused = (await db.getChat(phone))?.paused === 1;
     await recordAdvisorMessage(phone, msg.body);
     await db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
     if (!wasPaused) {

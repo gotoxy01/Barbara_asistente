@@ -212,7 +212,7 @@ async function closeTicket(ticketId, patch = {}) {
 
 async function handleApprove(ticket) {
   // En caja (pesaje/consulta) el cliente ya recibió el “espere…”: hace falta el precio.
-  const pending = pendingWeighItems(await db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
+  const pending = pendingWeighItems((await db.getActiveOrder(ticket.clienteTelefono))?.items ?? []);
   if ((ticket.motivo === 'caja' || pending.length) && pending.length) {
     updateTicket(ticket.ticketId, { estado: 'ESPERANDO_EDICION' });
     setEditingTicket(ticket.ticketId);
@@ -236,7 +236,7 @@ async function handleNoStock(ticket) {
   await closeTicket(ticket.ticketId);
 
   // Si hay pesaje/consulta pendiente, reutiliza el flujo de caja.
-  const pending = pendingWeighItems(await db.getActiveOrder(ticket.clienteTelefono)?.items ?? []);
+  const pending = pendingWeighItems((await db.getActiveOrder(ticket.clienteTelefono))?.items ?? []);
   if (pending.length) {
     const bcv = await getBcvRate();
     const result = await applyNotAvailable(ticket.clienteTelefono, bcv, { ticketItems: ticket.items });

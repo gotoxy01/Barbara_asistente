@@ -50,7 +50,7 @@ describe('costos del panel', () => {
 
 const skip = !process.env.DATABASE_URL;
 
-describe('panel: simulador y uso', { skip }, () => {
+describe('panel: simulador y uso', { skip, concurrency: 1 }, () => {
   it('un saludo de prueba devuelve el menú y no cuenta como uso', async () => {
     const db = await import('../src/db.js');
     const { recordUsage, usageReport } = await import('../src/services/usage.js');
@@ -87,6 +87,49 @@ describe('panel: simulador y uso', { skip }, () => {
       const products = await fetch(`${base}/api/products?q=harina`);
       const catalog = await products.json();
       assert.ok(catalog.products.some((product) => /harina/i.test(product.nombre)));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await db.closeDb();
+    }
+  });
+
+  it('la cocina y el resto del panel leen listas de Postgres, no la promesa', async () => {
+    const db = await import('../src/db.js');
+    const { listOrderNotes } = await import('../src/services/notesService.js');
+    const { createCrmApp } = await import('../src/crm/server.js');
+    await db.initDb();
+    const notes = await listOrderNotes();
+    assert.ok(Array.isArray(notes));
+    const app = createCrmApp();
+    const server = await new Promise((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const paths = [
+      '/api/notes',
+      '/api/orders/board',
+      '/api/orders/today',
+      '/api/alerts',
+      '/api/usage',
+      '/api/customers',
+      '/api/products',
+      '/api/stock-pendiente',
+      '/api/ventas',
+      '/api/simulator/pedido?phone=580000000000',
+    ];
+    try {
+      for (const path of paths) {
+        const res = await fetch(`${base}${path}`);
+        const body = await res.json();
+        assert.equal(res.status, 200, `${path} respondió ${res.status}: ${JSON.stringify(body)}`);
+        assert.equal(body.error, undefined, path);
+      }
+      const board = await (await fetch(`${base}/api/orders/board`)).json();
+      assert.ok(Array.isArray(board.orders));
+      const today = await (await fetch(`${base}/api/orders/today`)).json();
+      assert.ok(Array.isArray(today.orders));
+      const alerts = await (await fetch(`${base}/api/alerts`)).json();
+      assert.ok(Array.isArray(alerts.alerts));
     } finally {
       await new Promise((resolve) => server.close(resolve));
       await db.closeDb();

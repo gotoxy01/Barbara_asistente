@@ -947,7 +947,7 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
       { kind: 'tech', phone, title: alertKind === 'billing' ? 'Gemini sin créditos' : 'Bárbara no pudo responder', whatsapp: false },
     );
   }
-  if (resume && FAILURE_REPLY_RE.test(await db.getLatestMessage(phone)?.content ?? '')) {
+  if (resume && FAILURE_REPLY_RE.test((await db.getLatestMessage(phone))?.content ?? '')) {
     return { reply: null, escalated: false, paused: false, productContext, error };
   }
   return { reply: RETRY_LATER_REPLY, escalated: false, paused: false, productContext, error };

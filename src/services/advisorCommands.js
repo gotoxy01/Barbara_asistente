@@ -287,7 +287,7 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
       try {
         const sent = await sendMessage(phone, rest.trim());
         await recordAdvisorMessage(phone, outboundRecord(sent, rest.trim()));
-        const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+        const specialist = (await db.getChat(phone))?.status === 'SPECIALIST';
         if (!specialist) await db.pauseChat(phone, manualPauseMs());
         await ack(sent?.mode === 'template'
           ? `✅ La ventana de 24 h está cerrada: a +${phone} se le envió la plantilla, no el texto libre.`

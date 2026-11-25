@@ -87,7 +87,7 @@ export function createCrmApp() {
       const stored = outboundRecord(sent, text);
       await recordAdvisorMessage(phone, stored);
       await recordUsage({ phone, kind: sent?.mode === 'template' ? 'template' : 'outbound_seller' });
-      const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+      const specialist = (await db.getChat(phone))?.status === 'SPECIALIST';
       if (!specialist) await db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
       return res.json({
         ok: true,
