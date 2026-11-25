@@ -126,6 +126,8 @@ Los rótulos están en `src/menus.js`. En `npm run chat` cada menú se ve numera
 
 Al asesor le llegan botones `Pago verificado` / `Rechazar` y `Hay` / `No hay`. Equivalen a `#pagado`, `#rechazar`, `#hay` y `#nohay`.
 
+El panel de cocina (`http://127.0.0.1:3847`) tiene además Probar Bárbara, Uso y costos, Clientes, Productos y Ventas. La prueba usa el mismo flujo que WhatsApp, no manda mensajes y no entra en el costo. Las tarifas están en `WA_SERVICE_FREE`, `WA_SERVICE_USD`, `WA_MARKETING_USD`, `GEMINI_INPUT_USD_PER_MILLION` y `GEMINI_OUTPUT_USD_PER_MILLION`.
+
 ## 4.2 Pedido, pago y entrega
 
 El pedido se guarda en Postgres desde el primer producto. No depende del chat ni de la memoria del proceso.

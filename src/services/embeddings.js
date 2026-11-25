@@ -87,6 +87,17 @@ export async function requestBatchEmbeddings(texts, {
     }
     const data = await response.json();
     const rows = data.embeddings || [];
+    const meta = data.usageMetadata || {};
+    try {
+      const { recordUsage } = await import('./usage.js');
+      await recordUsage({
+        kind: 'embedding',
+        calls: 1,
+        inputTokens: Number(meta.promptTokenCount || 0),
+      });
+    } catch {
+      /* el catálogo sigue aunque el conteo falle */
+    }
     return texts.map((_, index) => rows[index]?.values || null);
   }
   if (texts.length > 1) {

@@ -80,6 +80,13 @@ export const config = {
     perDay: Number(process.env.MAX_MENSAJES_POR_DIA ?? 150),
     blockMinutes: Number(process.env.BLOQUEO_MINUTOS ?? 30),
   },
+  usage: {
+    serviceFree: Number(process.env.WA_SERVICE_FREE ?? 1000),
+    serviceUsd: Number(process.env.WA_SERVICE_USD ?? 0.0113),
+    marketingUsd: Number(process.env.WA_MARKETING_USD ?? 0.074),
+    inputPerMillion: Number(process.env.GEMINI_INPUT_USD_PER_MILLION ?? 0.30),
+    outputPerMillion: Number(process.env.GEMINI_OUTPUT_USD_PER_MILLION ?? 2.50),
+  },
   serviceWindowHours: Number(process.env.SERVICE_WINDOW_HOURS ?? 24),
   // Si es false, un error técnico de Gemini NO pausa el chat (el cliente puede reintentar)
   pauseOnError: /^(1|true|si|sí)$/i.test(process.env.PAUSE_ON_ERROR || 'false'),

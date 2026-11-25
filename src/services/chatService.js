@@ -13,6 +13,7 @@ import { loadProfileSummary } from './orderBook.js';
 import { tryOperationalTurn } from './operationalTurn.js';
 import { openMainMenu, rememberMenu, takeMenuTurn } from './menuFlow.js';
 import { assessFlood, collapseBurst } from './floodControl.js';
+import { recordUsage } from './usage.js';
 import { renderMenuText } from '../menus.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
@@ -361,7 +362,7 @@ async function judgeFlood(phone, text) {
   });
 }
 
-async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor, onWait = null } = {}) {
+async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor, onWait = null, test = false } = {}) {
   text = collapseBurst(text);
   if (!text) return { reply: null, escalated: false, paused: false, ignored: true };
   let chat = await db.upsertChat(phone, name);
@@ -380,7 +381,12 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     if (latest?.role === 'model') return { reply: null, escalated: false, paused: false, duplicate: true };
   } else {
     const durantePausa = chat.status === 'SPECIALIST' || chat.paused === 1 || chat.paused === true;
-    await db.addMessage(phone, 'user', text, wamid, durantePausa ? { raw: { durante_pausa: 'si' } } : {});
+    const raw = {
+      ...(durantePausa ? { durante_pausa: 'si' } : {}),
+      ...(test ? { prueba: 'si' } : {}),
+    };
+    await db.addMessage(phone, 'user', text, wamid, Object.keys(raw).length ? { raw } : {});
+    if (!test) await recordUsage({ phone, kind: 'inbound' });
   }
   const displayName = chat.name || name;
 
@@ -434,7 +440,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
 
   const history = historyForModel(await db.getHistory(phone, config.historyLimit, config.newConversationHours));
-  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait });
+  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait, test });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
 
@@ -453,7 +459,7 @@ async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
 /**
  * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
  */
-async function produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait = null, resume = false }) {
+async function produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait = null, resume = false, test = false }) {
   history = historyForModel(history);
   const turnStarted = Date.now();
   const timings = [];
@@ -570,6 +576,12 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
     verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini${lightTurn ? ' (sin herramientas ni auditor)' : ''}.`);
     if (onWait) await onWait('modelo');
     const result = await generateBarbaraReply(systemPrompt, scopedHistory, lightTurn ? undefined : tools);
+    if (!test && result.usage?.calls) {
+      await recordUsage({
+        phone, kind: 'gemini', calls: result.usage.calls,
+        inputTokens: result.usage.input, outputTokens: result.usage.output,
+      });
+    }
     mark = lap('Gemini', mark);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
     const decision = decideEscalation({
@@ -701,6 +713,12 @@ async function runAuditor({ phone, mensaje_cliente, datos_bd, borrador_barbara, 
   const hadResume = /demora/i.test(borrador_barbara);
   try {
     const result = await auditBarbaraReply({ mensaje_cliente, datos_bd, borrador_barbara });
+    if (result.usage?.calls) {
+      await recordUsage({
+        phone, kind: 'gemini', calls: result.usage.calls,
+        inputTokens: result.usage.input, outputTokens: result.usage.output,
+      });
+    }
     let final = enforceBusinessName(result.mensaje_final);
     if (!final) return null;
 
@@ -817,6 +835,7 @@ export async function completeCustomerTurn(phone, result) {
       confidence: result.confianza,
       raw: result.handoff ? { producto: result.handoff.producto, motivo: result.handoff.motivo } : null,
     });
+    await recordUsage({ phone, kind: sent?.mode === 'template' ? 'template' : 'outbound_bot' });
   }
   if (result?.escalated && result.handoff) {
     await finalizeHandoff({ phone, name: result.handoff.name, handoff: result.handoff });
