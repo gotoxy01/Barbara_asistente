@@ -304,9 +304,17 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
   const toolCalls = [];
   const turn = { model: config.gemini.model };
   let jsonRetries = 0;
+  const usage = { input: 0, output: 0, calls: 0 };
+  const takeUsage = (response) => {
+    usage.calls += 1;
+    const meta = response?.usageMetadata || {};
+    usage.input += Number(meta.promptTokenCount || 0);
+    usage.output += Number(meta.candidatesTokenCount || 0);
+  };
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = await withRetries((model) => callGemini(model, systemPrompt, contents, tools), turn);
+    takeUsage(response);
     const calls = response.functionCalls ?? [];
 
     if (!calls.length || !tools) {
@@ -333,6 +341,7 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
         motivo: parsed.motivo_escalado,
         model: turn.model,
         toolCalls,
+        usage,
       };
     }
 
@@ -356,6 +365,7 @@ export async function generateBarbaraReply(systemPrompt, history, tools) {
         motivo: null,
         model: turn.model,
         toolCalls,
+        usage,
       };
     }
 
@@ -454,8 +464,10 @@ export async function auditBarbaraReply(payload) {
     });
   }
 
+  const meta = response?.usageMetadata || {};
   const aprobado = parsed?.aprobado === true;
   return {
+    usage: { input: Number(meta.promptTokenCount || 0), output: Number(meta.candidatesTokenCount || 0), calls: 1 },
     aprobado,
     motivo_fallo: aprobado ? null : (parsed?.motivo_fallo ? String(parsed.motivo_fallo) : 'Rechazado por el auditor'),
     mensaje_final: mensaje,

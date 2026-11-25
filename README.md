@@ -13,7 +13,7 @@ Todos los datos (número de WhatsApp, asesor, pago móvil, claves) se cambian en
 3. Le pide la clave del usuario `postgres` (no se ve al escribir). La clave de la base `barbara` y la frase del panel las inventa y las guarda en `.env`. Después se abre el archivo para el token de Meta, el Phone number ID y Gemini.
 4. El mismo paso crea la base si aún no existe.
 5. `npm run doctor` debe mostrar OK en cada línea.
-6. `npm start`.
+6. Sin número de Meta todavía: `npm run panel` y abra http://127.0.0.1:3847. Con el token de WhatsApp: `npm start`.
 
 Para cambiar el número del negocio o el del asesor, edite `.env` y vuelva a iniciar. No hace falta modificar el programa.
 
@@ -60,7 +60,24 @@ npm run migrate:sqlite
 
 Al arrancar también abre el panel en `http://127.0.0.1:3847` y reintenta, durante la última hora, los mensajes que Gemini no pudo contestar.
 
-Si el catálogo en uso es `data/products.json`, la consola avisa en grande: esos precios son de prueba, no los de la caja. Copie `database.db` o defina `CATALOG_DB_PATH`.
+Si el catálogo en uso es `data/products.json`, la consola avisa en grande: esos precios son de prueba, no los de la caja.
+
+Para probar con una caja de demostración (unas 500 referencias, el mismo esquema que lee Bárbara):
+
+```powershell
+npm run caja:demo
+```
+
+En `.env`:
+
+```
+CATALOG_SOURCE=db
+CATALOG_DB_PATH=data/caja-demo/database.db
+```
+
+En Windows también vale `CATALOG_DB_PATH=data\caja-demo\database.db`, o la ruta completa, por ejemplo `C:\Users\Roni\Barbara_asistente\data\caja-demo\database.db`. `DELIVERY_ITEM_NAME` puede quedarse en `Delivery costo`. El archivo `.db` no se sube a git; se vuelve a crear con el mismo comando.
+
+`npm run sync` lee esa caja, dice cuántos productos entran y, si hay `DATABASE_URL`, los copia a Postgres. Los de stock 0, sin precio o con el nombre hecho solo de números no entran: así los filtra la caja de verdad.
 
 ## 3. Cómo atiende
 
@@ -79,6 +96,8 @@ Comandos del asesor (al número del negocio o, en el modo QR, en Mensajes para m
 | `#r 584121234567 mensaje` | Responder al cliente |
 | `#pausar 584121234567` | Dejar el chat con el especialista |
 | `#reanudar 584121234567` | Devolver el chat a Bárbara |
+| `#bloquear 584121234567` | No responderle (spam o a mano) |
+| `#desbloquear 584121234567` | Quitar ese bloqueo |
 | `#precio 1.50` | Precio en USD de lo que se pesó |
 | `#nohay` | Avisar que no hay |
 | `#b` | Ver o borrar pedidos pendientes |
@@ -86,7 +105,13 @@ Comandos del asesor (al número del negocio o, en el modo QR, en Mensajes para m
 
 ## 4. Probar sin WhatsApp
 
+Sin token de Meta, `npm start` se detiene y avisa que use `npm run panel`. Ese modo (o `BARBARA_MODO=prueba` en `.env`) abre Postgres, el catálogo y el panel en http://127.0.0.1:3847. No hay webhook ni envío a WhatsApp: lo que habría salido queda en el log y los avisos al asesor se ven solo en el panel. Al iniciar dice: «Modo prueba: WhatsApp desconectado. Abra http://127.0.0.1:3847».
+
 Con `GEMINI_API_KEY` y los datos de pago móvil y del panel en `.env`:
+
+```powershell
+npm run panel
+```
 
 ```powershell
 npm run chat
@@ -97,7 +122,19 @@ npm test
 
 `npm run chat` no espera los 3,5 s con los que WhatsApp junta mensajes seguidos, e imprime el tiempo de cada paso (tasa, catálogo, modelo). `--nuevo`, o el comando `borrar` dentro del chat, limpia la conversación del cliente de prueba para que no quede una respuesta vieja.
 
-## 4.1 Pedido, pago y entrega
+## 4.1 Menús de WhatsApp
+
+Dentro de las 24 horas, Bárbara puede mandar botones (hasta 3) o una lista (hasta 10). El cliente toca una opción y el programa la entiende por el id, sin llamar al modelo. Si escribe el número de la última lista (`1`, `2`…), es lo mismo. Hacer pedido pide el nombre y busca en el catálogo; no pagina categorías. Puede escribir varios productos en un mensaje. Si no hay coincidencia, se verifica el stock con el vendedor.
+
+`MAX_MENSAJES_POR_MINUTO` (10), `MAX_MENSAJES_POR_DIA` (150) y `BLOQUEO_MINUTOS` (30) cortan una ráfaga: una advertencia, aviso al vendedor y silencio. Los textos idénticos se ignoran. WhatsApp ya junta lo que llega en `DEBOUNCE_WINDOW_MS` (3,5 s) y responde una sola vez.
+
+Los rótulos están en `src/menus.js`. En `npm run chat` cada menú se ve numerado, con el id entre corchetes.
+
+Al asesor le llegan botones `Pago verificado` / `Rechazar` y `Hay` / `No hay`. Equivalen a `#pagado`, `#rechazar`, `#hay` y `#nohay`.
+
+El panel de cocina (`http://127.0.0.1:3847`) tiene además Probar Bárbara, Uso y costos, Clientes, Productos y Ventas. La prueba usa el mismo flujo que WhatsApp, no manda mensajes y no entra en el costo. Las tarifas están en `WA_SERVICE_FREE`, `WA_SERVICE_USD`, `WA_MARKETING_USD`, `GEMINI_INPUT_USD_PER_MILLION` y `GEMINI_OUTPUT_USD_PER_MILLION`.
+
+## 4.2 Pedido, pago y entrega
 
 El pedido se guarda en Postgres desde el primer producto. No depende del chat ni de la memoria del proceso.
 

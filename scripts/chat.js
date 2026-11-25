@@ -38,7 +38,7 @@ console.log('Chat de prueba con Bárbara (cliente: ' + name + ', +' + phone + ')
 console.log('Sin la espera de 3,5 s de WhatsApp: aquí cada mensaje se responde al momento.');
 console.log('Escriba "salir" para terminar, "borrar" para limpiar el hilo, o "reanudar" / "#reanudar" si quedó con el especialista.');
 console.log('Ubicación de prueba: /ubicacion 10.4806,-66.9036');
-console.log('Como asesor: !pagado <pedido> o !rechazar <pedido> (no confirma el pago hasta ese paso).\n');
+console.log('Como asesor: !pagado <pedido>, !rechazar <pedido>, !bloquear o !desbloquear.\n');
 const openOrders = await reloadOpenOrders();
 console.log(`Pedidos abiertos recuperados: ${openOrders.length}.`);
 
@@ -62,6 +62,14 @@ while (true) {
   if (command === 'borrar' || command === 'nuevo') {
     const removed = await clearCustomerThread(phone);
     console.log(`Listo: se borraron ${removed} mensajes de +${phone}. La próxima pregunta no ve el historial anterior.\n`);
+    continue;
+  }
+  if (/^!(bloquear|desbloquear)\b/i.test(text)) {
+    const { handleAdvisorCommand } = await import('../src/services/advisorCommands.js');
+    const body = text.replace(/^!/, '#');
+    const command = /^!(bloquear|desbloquear)\s*$/i.test(text) ? `${body} ${phone}` : body;
+    await handleAdvisorCommand(command);
+    console.log('Listo.\n');
     continue;
   }
   if (text.startsWith('!pagado') || text.startsWith('!rechazar')) {
@@ -96,7 +104,14 @@ while (true) {
   }
 
   const started = performance.now();
-  const result = await handleCustomerMessage({ phone, name, text }, { notify: printNotice });
+  const result = await handleCustomerMessage({ phone, name, text }, {
+    notify: printNotice,
+    onWait: async (kind) => {
+      console.log(kind === 'stock'
+        ? 'Un momento, por favor. Le confirmo con el vendedor. ⏳'
+        : 'Un momento, por favor. ⏳');
+    },
+  });
   const elapsed = ((performance.now() - started) / 1000).toFixed(1);
   if (result.error?.kind === 'billing') {
     console.error('  Aviso: Gemini está sin créditos (429). Recargue el plan en Google AI Studio. El cliente ya recibió el aviso amable; no se escala otra vez por 10 minutos.');
@@ -107,6 +122,7 @@ while (true) {
   }
   const steps = formatTimings(result.timings);
   if (steps) console.log(`  Tiempos: ${steps}`);
+  if (result.menu) console.log('  (Menú: responda con el número. En WhatsApp salen botones o lista.)');
   if (result.reply) {
     console.log(`\nBárbara (${elapsed} s${result.model ? `, ${result.model}` : ''}): ${result.reply}\n`);
     await addMessage(phone, 'model', result.historyText || result.reply);

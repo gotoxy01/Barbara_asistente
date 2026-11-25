@@ -20,6 +20,8 @@ const HELP =
   '#r <teléfono> <mensaje>: responder al cliente desde el número del negocio\n' +
   '#pausar <teléfono>: pasar el chat a especialista (Bárbara no responde hasta #reanudar)\n' +
   '#reanudar <teléfono>: reactivar a Bárbara en ese chat\n' +
+  '#bloquear <teléfono>: no responderle hasta #desbloquear\n' +
+  '#desbloquear <teléfono>: quitar el bloqueo por spam o el manual\n' +
   '#pagado <pedido>: el pago ya se vio en el banco; descuenta el inventario una sola vez\n' +
   '#rechazar <pedido>: el comprobante no sirve; si ya se había descontado, se devuelve\n' +
   '#ayuda: ver esta lista';
@@ -264,13 +266,28 @@ export async function handleAdvisorCommand(body, { quotedBody } = {}) {
       await db.resumeChat(phone);
       await ack(`▶️ Bárbara reactivada para +${phone}.`);
       return true;
+    case 'bloquear': {
+      const target = normalizePhone(phone || rest);
+      if (!target || target.length < 10) break;
+      await db.upsertChat(target, null);
+      await db.saveChatBlock(target, { reason: 'manual', blockedUntil: null });
+      await ack(`⏸️ +${target} quedó bloqueado. No se le responde hasta #desbloquear.`);
+      return true;
+    }
+    case 'desbloquear': {
+      const target = normalizePhone(phone || rest);
+      if (!target || target.length < 10) break;
+      await db.clearChatBlock(target);
+      await ack(`▶️ +${target} quedó desbloqueado.`);
+      return true;
+    }
     case 'r':
     case 'responder':
       if (!phone || !rest.trim()) break;
       try {
         const sent = await sendMessage(phone, rest.trim());
         await recordAdvisorMessage(phone, outboundRecord(sent, rest.trim()));
-        const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+        const specialist = (await db.getChat(phone))?.status === 'SPECIALIST';
         if (!specialist) await db.pauseChat(phone, manualPauseMs());
         await ack(sent?.mode === 'template'
           ? `✅ La ventana de 24 h está cerrada: a +${phone} se le envió la plantilla, no el texto libre.`

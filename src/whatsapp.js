@@ -1,11 +1,15 @@
 import crypto from 'node:crypto';
-import { config } from './config.js';
+import { config, isPanelMode } from './config.js';
 
 function apiUrl(path) {
   return `https://graph.facebook.com/${config.whatsapp.apiVersion}/${config.whatsapp.phoneNumberId}/${path}`;
 }
 
 async function post(path, body) {
+  if (isPanelMode()) {
+    console.log(`[modo prueba] Envío a WhatsApp deshabilitado (${path}) para +${body?.to || '?'}.`);
+    return { skipped: true, messages: [] };
+  }
   const res = await fetch(apiUrl(path), {
     method: 'POST',
     headers: {
@@ -67,6 +71,32 @@ export function sendInteractiveButtons(to, { bodyText, buttons, footer }) {
       body: { text: String(bodyText || '').slice(0, 1024) },
       ...(footer ? { footer: { text: String(footer).slice(0, 60) } } : {}),
       action: { buttons: replyButtons },
+    },
+  });
+}
+
+/**
+ * Lista interactiva. Máximo 10 filas; título ≤24; descripción ≤72.
+ * @param {string} to
+ * @param {{ bodyText: string, buttonText?: string, rows: { id: string, title: string, description?: string }[] }} opts
+ */
+export function sendInteractiveList(to, { bodyText, buttonText = 'Ver opciones', rows }) {
+  const mapped = (rows || []).slice(0, 10).map((row) => ({
+    id: String(row.id).slice(0, 200),
+    title: String(row.title).slice(0, 24),
+    ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
+  }));
+  return post('messages', {
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      body: { text: String(bodyText || '').slice(0, 1024) },
+      action: {
+        button: String(buttonText).slice(0, 20),
+        sections: [{ title: 'Opciones', rows: mapped }],
+      },
     },
   });
 }

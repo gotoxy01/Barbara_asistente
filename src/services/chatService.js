@@ -1,7 +1,7 @@
-import { config } from '../config.js';
+import { config, isPanelMode } from '../config.js';
 import * as db from '../db.js';
 import { info, verbose, error as logError } from '../log.js';
-import { getSelfPhone, outboundRecord, sendMessage } from '../messenger.js';
+import { getChannel, getSelfPhone, outboundRecord, sendMenu, sendMessage } from '../messenger.js';
 import { auditBarbaraReply, buildSystemPrompt, generateBarbaraReply, greetingForNow } from './aiService.js';
 import { decideEscalation, forcedHandoffReason, replyForEscalation } from './escalationPolicy.js';
 import { STOCK_CHECK_REPLY, historyForModel, isGeneralCatalogAsk, isLightTurn, isOnlyGreetingOrControl, replyIfInventedSku, substantiveLines } from './customerText.js';
@@ -11,6 +11,10 @@ import { catalogCustomerReply, catalogOverviewText, searchProducts } from './cat
 import { isOperationalTurn } from './orderLifecycle.js';
 import { loadProfileSummary } from './orderBook.js';
 import { tryOperationalTurn } from './operationalTurn.js';
+import { openMainMenu, rememberMenu, takeMenuTurn } from './menuFlow.js';
+import { assessFlood, collapseBurst } from './floodControl.js';
+import { recordUsage } from './usage.js';
+import { renderMenuText } from '../menus.js';
 import { abrirTicketPago, physicalTicketKind, solicitarAprobacionRapida } from './operatorConsoleService.js';
 import {
   ADDRESS_QUESTION,
@@ -96,7 +100,7 @@ export async function notifyAdvisor(text, options = {}) {
     }
   }
 
-  if (!options.whatsapp) return;
+  if (!options.whatsapp || isPanelMode()) return;
   const target = config.advisorPhone || getSelfPhone();
   if (!target) return;
   try {
@@ -332,7 +336,35 @@ export function handleCustomerMessage(message, options) {
   return lockPhone(message.phone, () => handleCustomerMessageNow(message, options));
 }
 
-async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor } = {}) {
+async function judgeFlood(phone, text) {
+  const now = Date.now();
+  const block = await db.getChatBlock(phone);
+  const [countMinute, countDay, recent] = await Promise.all([
+    db.countUserMessagesSince(phone, now - 60_000),
+    db.countUserMessagesSince(phone, now - 86_400_000),
+    db.recentUserMessages(phone, 2),
+  ]);
+  const previous = recent[1];
+  return assessFlood({
+    now,
+    countMinute,
+    countDay,
+    limitPerMinute: config.flood.perMinute,
+    limitPerDay: config.flood.perDay,
+    blockMs: config.flood.blockMinutes * 60_000,
+    blockedUntil: block?.blockedUntil || null,
+    manual: block?.reason === 'manual',
+    warnedAt: block?.warnedAt || null,
+    notifiedAt: block?.notifiedAt || null,
+    text,
+    previousText: previous?.content || '',
+    previousAt: previous?.created_at || 0,
+  });
+}
+
+async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { notify = notifyAdvisor, onWait = null, test = false } = {}) {
+  text = collapseBurst(text);
+  if (!text) return { reply: null, escalated: false, paused: false, ignored: true };
   let chat = await db.upsertChat(phone, name);
   await db.touchCustomerWindow(phone);
   chat = await db.getChat(phone);
@@ -349,9 +381,33 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
     if (latest?.role === 'model') return { reply: null, escalated: false, paused: false, duplicate: true };
   } else {
     const durantePausa = chat.status === 'SPECIALIST' || chat.paused === 1 || chat.paused === true;
-    await db.addMessage(phone, 'user', text, wamid, durantePausa ? { raw: { durante_pausa: 'si' } } : {});
+    const raw = {
+      ...(durantePausa ? { durante_pausa: 'si' } : {}),
+      ...(test ? { prueba: 'si' } : {}),
+    };
+    await db.addMessage(phone, 'user', text, wamid, Object.keys(raw).length ? { raw } : {});
+    if (!test) await recordUsage({ phone, kind: 'inbound' });
   }
   const displayName = chat.name || name;
+
+  const flood = test ? { action: 'allow' } : await judgeFlood(phone, text);
+  if (flood.action !== 'allow') {
+    if (flood.persist) {
+      await db.saveChatBlock(phone, {
+        blockedUntil: flood.blockedUntil ?? null,
+        warnedAt: flood.warnedAt ?? null,
+        notifiedAt: flood.notify ? Date.now() : null,
+        reason: flood.reason || 'flood',
+      });
+    }
+    if (flood.notify) {
+      await notify(
+        `+${phone} mandó muchos mensajes seguidos. Quedó bloqueado ${config.flood.blockMinutes} min. Para soltarlo: #desbloquear ${phone}`,
+        { kind: 'flood', phone, title: 'Posible spam', whatsapp: true },
+      );
+    }
+    return { reply: flood.reply, escalated: false, paused: flood.action !== 'ignore', flood: true };
+  }
 
   if (chat.status === 'LOGISTICA') {
     await notify(
@@ -384,7 +440,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
 
   const history = historyForModel(await db.getHistory(phone, config.historyLimit, config.newConversationHours));
-  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify });
+  const outcome = await produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait, test });
   return finishReply({ phone, displayName, text, notify, outcome });
 }
 
@@ -403,7 +459,7 @@ async function resetCustomerOrderSession(phone, { quiet = false } = {}) {
 /**
  * Genera la respuesta a partir del historial ya guardado. `resume` no vuelve a guardar el mensaje del cliente.
  */
-async function produceReply({ phone, displayName, text, history, isNewConversation, notify, resume = false }) {
+async function produceReply({ phone, displayName, text, history, isNewConversation, notify, onWait = null, resume = false, test = false }) {
   history = historyForModel(history);
   const turnStarted = Date.now();
   const timings = [];
@@ -419,11 +475,42 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   };
   let mark = turnStarted;
   const scopedHistory = scopeHistoryForTurn(history, isNewConversation);
+  const menuTurn = await takeMenuTurn(phone, text, null, onWait);
+  if (menuTurn?.stockCheck?.length) {
+    await notify(
+      [
+        `Verificar stock: *${menuTurn.stockCheck.join(', ')}*`,
+        `Cliente: ${displayName || 'Sin nombre'} (+${phone})`,
+        `Si lo hay: #hay ${phone} <producto> <precio USD>`,
+        `Si no lo hay: #nohay ${phone} <producto>`,
+      ].join('\n'),
+      { kind: 'weigh', phone, title: `Verificar stock: ${menuTurn.stockCheck[0]}`, whatsapp: true },
+    );
+  }
+  if (menuTurn?.reply) {
+    timings.push({ step: 'menú', ms: Date.now() - turnStarted });
+    timings.push({ step: 'Gemini', ms: 0, skipped: true });
+    return {
+      reply: menuTurn.reply,
+      menu: menuTurn.menu || null,
+      escalated: Boolean(menuTurn.escalated),
+      paused: false,
+      productContext: 'Menú, sin modelo.',
+      timings: closeTimings(),
+      summary: summarizeTurns(scopedHistory),
+      motivo: menuTurn.escalated ? 'El cliente pidió un asesor' : null,
+    };
+  }
   if (isOnlyGreetingOrControl(text) || isGreeting(text)) {
+    const opened = openMainMenu();
+    const greet = greetingReply(text, isNewConversation, displayName);
+    opened.menu = { ...opened.menu, body: `${greet}\n\n${opened.menu.body}` };
+    rememberMenu(phone, opened);
     timings.push({ step: 'Gemini', ms: 0, skipped: true });
     timings.push({ step: 'auditor', ms: 0, skipped: true });
     return {
-      reply: greetingReply(text, isNewConversation, displayName),
+      reply: renderMenuText(opened.menu),
+      menu: opened.menu,
       escalated: false,
       paused: false,
       productContext: 'Saludo, sin modelo.',
@@ -487,7 +574,14 @@ async function produceReply({ phone, displayName, text, history, isNewConversati
   const pendingBefore = pendingWeighItems((await db.getActiveOrder(phone))?.items ?? []).length;
   try {
     verbose(`Contexto listo en ${Date.now() - turnStarted} ms. Llamando a Gemini${lightTurn ? ' (sin herramientas ni auditor)' : ''}.`);
+    if (onWait) await onWait('modelo');
     const result = await generateBarbaraReply(systemPrompt, scopedHistory, lightTurn ? undefined : tools);
+    if (!test && result.usage?.calls) {
+      await recordUsage({
+        phone, kind: 'gemini', calls: result.usage.calls,
+        inputTokens: result.usage.input, outputTokens: result.usage.output,
+      });
+    }
     mark = lap('Gemini', mark);
     const cartCommitted = Boolean(tools.state.boleta || tools.state.addressSaved);
     const decision = decideEscalation({
@@ -619,6 +713,12 @@ async function runAuditor({ phone, mensaje_cliente, datos_bd, borrador_barbara, 
   const hadResume = /demora/i.test(borrador_barbara);
   try {
     const result = await auditBarbaraReply({ mensaje_cliente, datos_bd, borrador_barbara });
+    if (result.usage?.calls) {
+      await recordUsage({
+        phone, kind: 'gemini', calls: result.usage.calls,
+        inputTokens: result.usage.input, outputTokens: result.usage.output,
+      });
+    }
     let final = enforceBusinessName(result.mensaje_final);
     if (!final) return null;
 
@@ -712,6 +812,7 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
     model: outcome.model,
     confianza: outcome.confianza ?? null,
     timings: outcome.timings || [],
+    menu: outcome.menu || null,
   };
 }
 
@@ -719,8 +820,13 @@ async function finishReply({ phone, displayName, text, notify, outcome }) {
  * Envía la respuesta y, solo si WhatsApp la acepta, la guarda y aplica el pase a especialista.
  */
 export async function completeCustomerTurn(phone, result) {
+  if (result?.menu && getChannel() === 'cloud') {
+    await sendMenu(phone, result.menu);
+  }
   if (result?.reply) {
-    const sent = await sendMessage(phone, result.reply);
+    const sent = result?.menu && getChannel() === 'cloud'
+      ? { mode: 'text' }
+      : await sendMessage(phone, result.reply);
     let stored = outboundRecord(sent, result.historyText || result.reply);
     if (result.historyText?.includes(CANCEL_MARKER) && !stored.includes(CANCEL_MARKER)) {
       stored = `${stored}\n${CANCEL_MARKER}`;
@@ -729,6 +835,7 @@ export async function completeCustomerTurn(phone, result) {
       confidence: result.confianza,
       raw: result.handoff ? { producto: result.handoff.producto, motivo: result.handoff.motivo } : null,
     });
+    await recordUsage({ phone, kind: sent?.mode === 'template' ? 'template' : 'outbound_bot' });
   }
   if (result?.escalated && result.handoff) {
     await finalizeHandoff({ phone, name: result.handoff.name, handoff: result.handoff });
@@ -840,7 +947,7 @@ async function handleAiFailure({ phone, name, text, error, notify, productContex
       { kind: 'tech', phone, title: alertKind === 'billing' ? 'Gemini sin créditos' : 'Bárbara no pudo responder', whatsapp: false },
     );
   }
-  if (resume && FAILURE_REPLY_RE.test(await db.getLatestMessage(phone)?.content ?? '')) {
+  if (resume && FAILURE_REPLY_RE.test((await db.getLatestMessage(phone))?.content ?? '')) {
     return { reply: null, escalated: false, paused: false, productContext, error };
   }
   return { reply: RETRY_LATER_REPLY, escalated: false, paused: false, productContext, error };

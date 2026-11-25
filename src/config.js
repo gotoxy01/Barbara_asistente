@@ -75,6 +75,18 @@ export const config = {
   pauseHours: Number(process.env.BOT_PAUSE_HOURS || 12),
   confidenceThreshold: Number(process.env.CONFIDENCE_THRESHOLD ?? 85),
   debounceWindowMs: Number(process.env.DEBOUNCE_WINDOW_MS ?? 3500),
+  flood: {
+    perMinute: Number(process.env.MAX_MENSAJES_POR_MINUTO ?? 10),
+    perDay: Number(process.env.MAX_MENSAJES_POR_DIA ?? 150),
+    blockMinutes: Number(process.env.BLOQUEO_MINUTOS ?? 30),
+  },
+  usage: {
+    serviceFree: Number(process.env.WA_SERVICE_FREE ?? 1000),
+    serviceUsd: Number(process.env.WA_SERVICE_USD ?? 0.0113),
+    marketingUsd: Number(process.env.WA_MARKETING_USD ?? 0.074),
+    inputPerMillion: Number(process.env.GEMINI_INPUT_USD_PER_MILLION ?? 0.30),
+    outputPerMillion: Number(process.env.GEMINI_OUTPUT_USD_PER_MILLION ?? 2.50),
+  },
   serviceWindowHours: Number(process.env.SERVICE_WINDOW_HOURS ?? 24),
   // Si es false, un error técnico de Gemini NO pausa el chat (el cliente puede reintentar)
   pauseOnError: /^(1|true|si|sí)$/i.test(process.env.PAUSE_ON_ERROR || 'false'),
@@ -126,12 +138,24 @@ export const config = {
     maxResults: Number(process.env.CATALOG_MAX_RESULTS || 12),  },
 };
 
+/** `npm run panel` o BARBARA_MODO=prueba: CRM y simulador, sin número de Meta. */
+export function isPanelMode() {
+  return /^(prueba|panel)$/i.test(String(process.env.BARBARA_MODO || '').trim());
+}
+
 export function assertWhatsAppConfig() {
-  required('WHATSAPP_TOKEN');
-  required('WHATSAPP_PHONE_NUMBER_ID');
-  required('WHATSAPP_VERIFY_TOKEN');
-  required('WHATSAPP_APP_SECRET');
-  required('WHATSAPP_TEMPLATE_NAME');
+  const names = [
+    'WHATSAPP_TOKEN',
+    'WHATSAPP_PHONE_NUMBER_ID',
+    'WHATSAPP_VERIFY_TOKEN',
+    'WHATSAPP_APP_SECRET',
+    'WHATSAPP_TEMPLATE_NAME',
+  ];
+  const missing = names.filter((name) => !process.env[name]);
+  if (!missing.length) return;
+  throw new Error(
+    `Falta la variable de entorno ${missing[0]}. Para atender por WhatsApp, complétela en .env. Para probar sin número de Meta, ejecute npm run panel.`,
+  );
 }
 
 export function assertGeminiConfig() {

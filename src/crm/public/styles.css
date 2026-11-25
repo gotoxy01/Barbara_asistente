@@ -537,7 +537,43 @@ dialog::backdrop { background: rgba(42, 31, 24, 0.45); }
 .btn-ghost { background: #eee; }
 .btn-go { background: var(--yellow); }
 
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.tab {
+  border: 3px solid var(--ink);
+  background: #fff;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.tab.on { background: var(--yellow); }
+.admin-view { display: block; }
+.admin-view[hidden], #view-cocina[hidden] { display: none; }
+.admin-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.row input { flex: 1; min-width: 140px; border: 3px solid var(--ink); border-radius: 12px; padding: 10px; font-size: 1rem; }
+.sim-log { min-height: 220px; max-height: 420px; overflow: auto; background: #fff; border: 3px solid var(--ink); border-radius: 12px; padding: 10px; }
+.bubble { margin: 8px 0; padding: 8px 10px; border-radius: 12px; white-space: pre-wrap; }
+.bubble.user { background: #e7f3ff; }
+.bubble.bot { background: #fff4cc; }
+.sim-menu { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.block-banner {
+  background: #ffe1e1;
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.block-banner p { margin: 0; font-weight: 800; }
+.sim-menu button, .table button { border: 3px solid var(--ink); border-radius: 10px; background: #fff; font-weight: 700; padding: 8px 10px; cursor: pointer; }
+.table { width: 100%; border-collapse: collapse; background: #fff; }
+.table th, .table td { border-bottom: 1px solid #eadfce; text-align: left; padding: 8px; vertical-align: top; }
+.table th { font-size: 0.85rem; }
+
 @media (max-width: 800px) {
+  .admin-grid { grid-template-columns: 1fr; }
   .bench { grid-template-columns: 1fr; }
   .bench-left {
     border-right: none;

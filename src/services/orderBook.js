@@ -153,5 +153,5 @@ export async function loadProfileSummary(phone, name) {
 }
 
 export async function reloadOpenOrders() {
-  return db.listOpenOrders();
+  return await db.listOpenOrders();
 }

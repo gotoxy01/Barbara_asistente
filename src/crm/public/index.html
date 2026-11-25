@@ -25,6 +25,17 @@
       <button type="button" id="btnRefresh" class="btn-hud">↻ Actualizar</button>
     </header>
 
+    <nav class="tabs" id="tabs">
+      <button type="button" class="tab on" data-view="cocina">Cocina</button>
+      <button type="button" class="tab" data-view="probar">Probar Bárbara</button>
+      <button type="button" class="tab" data-view="uso">Uso y costos</button>
+      <button type="button" class="tab" data-view="clientes">Clientes</button>
+      <button type="button" class="tab" data-view="productos">Productos</button>
+      <button type="button" class="tab" data-view="ventas">Ventas</button>
+    </nav>
+
+    <div id="view-cocina">
+    <div id="blockBanner" class="block-banner" hidden></div>
     <section class="rail-wrap">
       <h2 class="rail-title">🔥 En cocina</h2>
       <div class="rail-bar"></div>
@@ -80,6 +91,95 @@
         </div>
       </div>
     </section>
+    </div>
+
+    <section id="view-probar" class="admin-view" hidden>
+      <div class="admin-grid">
+        <div class="panel">
+          <h2>Probar como cliente</h2>
+          <p class="meta">No sale por WhatsApp, no cuenta en el costo y no activa el límite de mensajes. Los botones de abajo son el menú.</p>
+          <div class="row">
+            <input id="simPhone" value="580000000000" />
+            <input id="simName" value="Cliente de prueba" />
+            <button type="button" id="simReset" class="btn-ghost">Empezar de cero</button>
+            <button type="button" id="simUnblock" class="btn-ghost">Desbloquear este número</button>
+          </div>
+          <div id="simLog" class="sim-log"></div>
+          <div id="simMenu" class="sim-menu"></div>
+          <form id="simForm" class="composer">
+            <input id="simText" placeholder="Escriba como el cliente" autocomplete="off" />
+            <button type="submit" class="btn-send">Enviar</button>
+          </form>
+          <div class="row">
+            <button type="button" id="simPin" class="btn-ghost">Enviar ubicación de prueba</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Pedido de esta prueba</h2>
+          <p id="simOrder" class="meta">Todavía no hay pedido.</p>
+          <div class="row">
+            <button type="button" id="simPayOk" class="btn-go">Pago verificado</button>
+            <button type="button" id="simPayNo" class="btn-ghost">Rechazar pago</button>
+          </div>
+          <div class="row">
+            <input id="simProduct" placeholder="Producto para #hay / #nohay" />
+            <input id="simPrice" placeholder="Precio USD" />
+          </div>
+          <div class="row">
+            <button type="button" id="simHay" class="btn-go">Hay</button>
+            <button type="button" id="simNoHay" class="btn-ghost">No hay</button>
+          </div>
+          <p class="meta">El pago y el stock se confirman aquí, sin mensaje de WhatsApp. En Cocina ve el mismo pedido.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-uso" class="admin-view" hidden>
+      <div class="panel">
+        <h2>Uso y costos del mes</h2>
+        <div class="row">
+          <input id="usageMonth" type="month" />
+          <button type="button" id="usageLoad" class="btn-go">Ver</button>
+          <a id="usageCsv" class="btn-ghost" href="#">Bajar CSV</a>
+        </div>
+        <p id="usageTotal" class="total"></p>
+        <p class="meta">Los 1000 primeros mensajes de servicio que salen en el mes no se cobran. Luego va la tarifa de .env. La prueba del simulador no entra.</p>
+        <div id="usageTable"></div>
+      </div>
+    </section>
+
+    <section id="view-clientes" class="admin-view" hidden>
+      <div class="panel">
+        <h2>Clientes</h2>
+        <div id="customerTable"></div>
+      </div>
+    </section>
+
+    <section id="view-productos" class="admin-view" hidden>
+      <div class="panel">
+        <h2>Productos (solo lectura)</h2>
+        <div class="row">
+          <input id="productQuery" placeholder="Buscar en el catálogo" />
+          <button type="button" id="productLoad" class="btn-go">Buscar</button>
+        </div>
+        <div id="productTable"></div>
+        <h3>Ajustes pendientes de pasar a la caja</h3>
+        <p id="ledgerNote" class="meta"></p>
+        <div id="ledgerTable"></div>
+      </div>
+    </section>
+
+    <section id="view-ventas" class="admin-view" hidden>
+      <div class="panel">
+        <h2>Ventas</h2>
+        <div class="row">
+          <button type="button" class="btn-ghost" data-range="day">Hoy</button>
+          <button type="button" class="btn-ghost" data-range="week">Semana</button>
+          <button type="button" class="btn-ghost" data-range="month">Mes</button>
+        </div>
+        <p id="salesTotal" class="total"></p>
+      </div>
+    </section>
 
     <div id="toast" class="toast" hidden></div>
   </div>
@@ -97,5 +197,6 @@
   </dialog>
 
   <script src="/app.js" type="module"></script>
+  <script src="/admin.js" type="module"></script>
 </body>
 </html>

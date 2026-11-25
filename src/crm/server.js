@@ -23,6 +23,8 @@ import {
 import { applyNotAvailable, applyWeighedPrice } from '../services/orderService.js';
 import { applyAction } from '../services/orderBook.js';
 import { subscribeCrm } from './events.js';
+import { registerAdminRoutes } from './admin.js';
+import { recordUsage } from '../services/usage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, 'public');
@@ -43,7 +45,7 @@ function auth(req, res, next) {
   return next();
 }
 
-function createApp() {
+export function createCrmApp() {
   const app = express();
   app.use(express.json({ limit: '256kb' }));
 
@@ -84,7 +86,8 @@ function createApp() {
       const sent = await sendMessage(phone, text);
       const stored = outboundRecord(sent, text);
       await recordAdvisorMessage(phone, stored);
-      const specialist = await db.getChat(phone)?.status === 'SPECIALIST';
+      await recordUsage({ phone, kind: sent?.mode === 'template' ? 'template' : 'outbound_seller' });
+      const specialist = (await db.getChat(phone))?.status === 'SPECIALIST';
       if (!specialist) await db.pauseChat(phone, config.manualPauseMinutes * 60 * 1000);
       return res.json({
         ok: true,
@@ -286,6 +289,8 @@ function createApp() {
     }
   });
 
+  registerAdminRoutes(app);
+
   app.get('/api/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -320,7 +325,7 @@ export function startCrmServer() {
     throw new Error(`Falta la carpeta del panel: ${publicDir}`);
   }
 
-  const app = createApp();
+  const app = createCrmApp();
   return new Promise((resolve, reject) => {
     httpServer = app.listen(config.crm.port, config.crm.host, () => {
       info(`Buzón CRM: http://${config.crm.host}:${config.crm.port}`);

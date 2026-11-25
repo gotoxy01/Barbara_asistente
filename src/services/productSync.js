@@ -78,20 +78,19 @@ export async function syncCatalog() {
     const current = await db.productEmbedHash(row.sku);
     if (current !== hash) pending.push({ sku: row.sku, hash, text: embedSource(row) });
   }
-  for (let i = 0; i < pending.length; i += 16) {
-    const slice = pending.slice(i, i + 16);
-    let vectors = [];
-    try {
-      vectors = await embedTexts(slice.map((item) => item.text));
-    } catch (err) {
-      console.warn('No se pudieron calcular embeddings:', err.message);
-      break;
-    }
-    for (let j = 0; j < slice.length; j += 1) {
-      const vector = vectors[j];
-      if (!vector || vector.length !== config.embedding.dimensions) continue;
-      await db.saveProductEmbedding(slice[j].sku, vector, slice[j].hash);
-    }
+  if (pending.length) {
+    console.log(`Embeddings pendientes: ${pending.length} de ${rows.length} (el resto no cambió).`);
+  }
+  let vectors = [];
+  try {
+    vectors = await embedTexts(pending.map((item) => item.text));
+  } catch (err) {
+    console.warn('No se pudieron calcular embeddings. El arranque sigue; se reintentan los pendientes:', err.message);
+  }
+  for (let i = 0; i < pending.length; i += 1) {
+    const vector = vectors[i];
+    if (!vector || vector.length !== config.embedding.dimensions) continue;
+    await db.saveProductEmbedding(pending[i].sku, vector, pending[i].hash);
   }
 
   const active = await db.listActiveProducts();

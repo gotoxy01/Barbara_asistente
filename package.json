@@ -6,6 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --use-system-ca src/server.js",
+    "panel": "node --use-system-ca src/panel.js",
     "start:cloud": "node --use-system-ca src/server.js",
     "start:qr": "node --use-system-ca src/wweb.js",
     "chat": "node --use-system-ca scripts/chat.js",
@@ -14,7 +15,9 @@
     "migrate:sqlite": "node --use-system-ca scripts/migrate-from-sqlite.js",
     "setup": "node --use-system-ca scripts/setup.js",
     "db:create": "node --use-system-ca scripts/db-create.js",
-    "doctor": "node --use-system-ca scripts/doctor.js"
+    "doctor": "node --use-system-ca scripts/doctor.js",
+    "caja:demo": "node scripts/crear-caja-demo.js",
+    "sync": "node --use-system-ca scripts/sync-caja.js"
   },
   "engines": {
     "node": ">=22.13"
