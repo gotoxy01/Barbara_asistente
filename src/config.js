@@ -138,12 +138,24 @@ export const config = {
     maxResults: Number(process.env.CATALOG_MAX_RESULTS || 12),  },
 };
 
+/** `npm run panel` o BARBARA_MODO=prueba: CRM y simulador, sin número de Meta. */
+export function isPanelMode() {
+  return /^(prueba|panel)$/i.test(String(process.env.BARBARA_MODO || '').trim());
+}
+
 export function assertWhatsAppConfig() {
-  required('WHATSAPP_TOKEN');
-  required('WHATSAPP_PHONE_NUMBER_ID');
-  required('WHATSAPP_VERIFY_TOKEN');
-  required('WHATSAPP_APP_SECRET');
-  required('WHATSAPP_TEMPLATE_NAME');
+  const names = [
+    'WHATSAPP_TOKEN',
+    'WHATSAPP_PHONE_NUMBER_ID',
+    'WHATSAPP_VERIFY_TOKEN',
+    'WHATSAPP_APP_SECRET',
+    'WHATSAPP_TEMPLATE_NAME',
+  ];
+  const missing = names.filter((name) => !process.env[name]);
+  if (!missing.length) return;
+  throw new Error(
+    `Falta la variable de entorno ${missing[0]}. Para atender por WhatsApp, complétela en .env. Para probar sin número de Meta, ejecute npm run panel.`,
+  );
 }
 
 export function assertGeminiConfig() {

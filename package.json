@@ -6,6 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node --use-system-ca src/server.js",
+    "panel": "node --use-system-ca src/panel.js",
     "start:cloud": "node --use-system-ca src/server.js",
     "start:qr": "node --use-system-ca src/wweb.js",
     "chat": "node --use-system-ca scripts/chat.js",

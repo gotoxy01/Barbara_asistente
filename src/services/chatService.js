@@ -1,4 +1,4 @@
-import { config } from '../config.js';
+import { config, isPanelMode } from '../config.js';
 import * as db from '../db.js';
 import { info, verbose, error as logError } from '../log.js';
 import { getChannel, getSelfPhone, outboundRecord, sendMenu, sendMessage } from '../messenger.js';
@@ -100,7 +100,7 @@ export async function notifyAdvisor(text, options = {}) {
     }
   }
 
-  if (!options.whatsapp) return;
+  if (!options.whatsapp || isPanelMode()) return;
   const target = config.advisorPhone || getSelfPhone();
   if (!target) return;
   try {

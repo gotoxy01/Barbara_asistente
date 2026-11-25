@@ -1,11 +1,15 @@
 import crypto from 'node:crypto';
-import { config } from './config.js';
+import { config, isPanelMode } from './config.js';
 
 function apiUrl(path) {
   return `https://graph.facebook.com/${config.whatsapp.apiVersion}/${config.whatsapp.phoneNumberId}/${path}`;
 }
 
 async function post(path, body) {
+  if (isPanelMode()) {
+    console.log(`[modo prueba] Envío a WhatsApp deshabilitado (${path}) para +${body?.to || '?'}.`);
+    return { skipped: true, messages: [] };
+  }
   const res = await fetch(apiUrl(path), {
     method: 'POST',
     headers: {

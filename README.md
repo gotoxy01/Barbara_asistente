@@ -13,7 +13,7 @@ Todos los datos (número de WhatsApp, asesor, pago móvil, claves) se cambian en
 3. Le pide la clave del usuario `postgres` (no se ve al escribir). La clave de la base `barbara` y la frase del panel las inventa y las guarda en `.env`. Después se abre el archivo para el token de Meta, el Phone number ID y Gemini.
 4. El mismo paso crea la base si aún no existe.
 5. `npm run doctor` debe mostrar OK en cada línea.
-6. `npm start`.
+6. Sin número de Meta todavía: `npm run panel` y abra http://127.0.0.1:3847. Con el token de WhatsApp: `npm start`.
 
 Para cambiar el número del negocio o el del asesor, edite `.env` y vuelva a iniciar. No hace falta modificar el programa.
 
@@ -105,7 +105,13 @@ Comandos del asesor (al número del negocio o, en el modo QR, en Mensajes para m
 
 ## 4. Probar sin WhatsApp
 
+Sin token de Meta, `npm start` se detiene y avisa que use `npm run panel`. Ese modo (o `BARBARA_MODO=prueba` en `.env`) abre Postgres, el catálogo y el panel en http://127.0.0.1:3847. No hay webhook ni envío a WhatsApp: lo que habría salido queda en el log y los avisos al asesor se ven solo en el panel. Al iniciar dice: «Modo prueba: WhatsApp desconectado. Abra http://127.0.0.1:3847».
+
 Con `GEMINI_API_KEY` y los datos de pago móvil y del panel en `.env`:
+
+```powershell
+npm run panel
+```
 
 ```powershell
 npm run chat

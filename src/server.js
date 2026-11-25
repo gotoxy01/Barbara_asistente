@@ -1,7 +1,7 @@
 // Bárbara en la WhatsApp Cloud API oficial de Meta (canal principal).
 // Uso: npm start
 import express from 'express';
-import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig, assertWhatsAppConfig, config } from './config.js';
+import { assertBusinessConfig, assertDatabaseConfig, assertGeminiConfig, assertWhatsAppConfig, config, isPanelMode } from './config.js';
 import { startCrmServer } from './crm/server.js';
 import * as db from './db.js';
 import { initDb } from './db.js';
@@ -25,25 +25,38 @@ import {
   sendText,
 } from './whatsapp.js';
 
-assertWhatsAppConfig();
+if (!isPanelMode()) assertWhatsAppConfig();
 assertGeminiConfig();
 assertBusinessConfig();
 assertDatabaseConfig();
 await initDb();
-setChannel('cloud');
-setSender((phone, text) => sendText(phone, text));
-setInteractiveSender((phone, payload) => sendInteractiveButtons(phone, payload));
+if (isPanelMode()) {
+  setChannel('panel');
+  setSender(async (phone, text) => {
+    console.log(`[modo prueba] Mensaje no enviado por WhatsApp a +${phone}: ${String(text || '').slice(0, 200)}`);
+  });
+  setInteractiveSender(async (phone, payload) => {
+    console.log(`[modo prueba] Menú no enviado por WhatsApp a +${phone}: ${String(payload?.bodyText || '').slice(0, 160)}`);
+  });
+} else {
+  setChannel('cloud');
+  setSender((phone, text) => sendText(phone, text));
+  setInteractiveSender((phone, payload) => sendInteractiveButtons(phone, payload));
+}
 
-startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
-startCatalogSync();
-startResumeLoop();
+if (!isPanelMode()) {
+  startCrmServer().catch((err) => warn('No se pudo iniciar el CRM:', err.message));
+  startCatalogSync();
+  startResumeLoop();
+}
 
-const inbound = await openInboundQueue({
+const inbound = isPanelMode() ? null : await openInboundQueue({
   windowMs: config.debounceWindowMs,
   onFlush: (phone, items) => processBatch(phone, items),
 });
 
 const app = express();
+if (!isPanelMode()) {
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 app.get('/', (_req, res) => res.send('Bárbara - Abasto Los Cuchos: en línea'));
@@ -186,8 +199,13 @@ async function processBatch(phone, items) {
     console.error(`[${phone}] No se completó el turno; Meta puede reintentarlo:`, err.message ?? err);
   }
 }
+}
 
-app.listen(config.port, () => {
+if (isPanelMode()) {
+  await startCrmServer();
+  startCatalogSync();
+  console.log(`Modo prueba: WhatsApp desconectado. Abra http://${config.crm.host}:${config.crm.port}`);
+} else app.listen(config.port, () => {
   console.log(`Bárbara (Cloud API ${config.whatsapp.apiVersion}) en http://localhost:${config.port}`);
   console.log(`Webhook: http://localhost:${config.port}/webhook`);
   const catalog = warnIfDemoCatalog();
