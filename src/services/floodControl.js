@@ -53,3 +53,17 @@ export function assessFlood({
   if (same) return { action: 'ignore', reply: null, notify: false, persist: false };
   return { action: 'allow', reply: null, notify: false, persist: false };
 }
+
+/** Texto del panel mientras el número no puede escribir. */
+export function blockNotice(block, now = Date.now()) {
+  if (!block) return '';
+  if (block.reason === 'manual' || !block.blockedUntil) return 'Número bloqueado a mano';
+  if (Number(block.blockedUntil) <= now) return '';
+  const when = new Intl.DateTimeFormat('es-VE', {
+    timeZone: 'America/Caracas',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date(Number(block.blockedUntil)));
+  return `Número bloqueado por exceso de mensajes hasta ${when}`;
+}

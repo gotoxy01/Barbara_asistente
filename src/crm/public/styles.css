@@ -556,7 +556,17 @@ dialog::backdrop { background: rgba(42, 31, 24, 0.45); }
 .bubble { margin: 8px 0; padding: 8px 10px; border-radius: 12px; white-space: pre-wrap; }
 .bubble.user { background: #e7f3ff; }
 .bubble.bot { background: #fff4cc; }
-.sim-menu { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.sim-menu { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.block-banner {
+  background: #ffe1e1;
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.block-banner p { margin: 0; font-weight: 800; }
 .sim-menu button, .table button { border: 3px solid var(--ink); border-radius: 10px; background: #fff; font-weight: 700; padding: 8px 10px; cursor: pointer; }
 .table { width: 100%; border-collapse: collapse; background: #fff; }
 .table th, .table td { border-bottom: 1px solid #eadfce; text-align: left; padding: 8px; vertical-align: top; }

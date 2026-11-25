@@ -7,6 +7,7 @@ import {
   LIMITS,
   choiceFromText,
   mainMenu,
+  menuSpeech,
   parseInteractive,
   productMenu,
   quantityMenu,
@@ -111,6 +112,12 @@ describe('menús de WhatsApp', () => {
     const closed = reduceMenu({ menu: mainMenu(), awaiting: null }, 'menu:retiro', { products, rate, order: draft });
     assert.equal(closed.order.lifecycle, 'boleta_enviada');
     assert.ok(closed.menu.options.some((row) => row.id === 'menu:pague'));
+    const speech = menuSpeech(closed.text);
+    assert.equal(speech.includes('[menu:'), false);
+    assert.equal(speech.includes('Responda con el número'), false);
+    const paid = reduceMenu(closed.session, '1', { products, rate, order: closed.order });
+    assert.equal(paid.session.awaiting, 'referencia');
+    assert.match(paid.text, /referencia/i);
 
     const several = reduceMenu({ awaiting: 'buscar', menu: null }, 'aceite, azúcar', { products, rate, order: { items: [] } });
     assert.equal(several.order.items.length, 2);

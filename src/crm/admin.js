@@ -3,10 +3,12 @@ import * as db from '../db.js';
 import { getProducts } from '../services/catalogService.js';
 import { handleCustomerMessage } from '../services/chatService.js';
 import { rememberMenu } from '../services/menuFlow.js';
+import { menuSpeech } from '../menus.js';
 import { applyConfirmedStock, applyRejectedStock } from '../services/orderService.js';
 import { applyAction } from '../services/orderBook.js';
 import { getBcvRate } from '../services/bcvService.js';
 import { monthRange, usageCsv, usageReport, zonedMidnight } from '../services/usage.js';
+import { blockNotice } from '../services/floodControl.js';
 import { config } from '../config.js';
 
 function digits(value) {
@@ -37,10 +39,11 @@ export function registerAdminRoutes(app) {
       await storeTestReply(phone, result.reply);
       return res.json({
         prueba: true,
-        reply: result.reply,
+        reply: result.menu ? menuSpeech(result.reply) : result.reply,
         menu: result.menu || null,
         escalated: Boolean(result.escalated),
         paused: Boolean(result.paused),
+        flood: false,
       });
     } catch (err) {
       return res.status(500).json({ error: err.message });
@@ -53,6 +56,7 @@ export function registerAdminRoutes(app) {
     rememberMenu(phone, { menu: null, awaiting: null, sku: null });
     const removed = await db.clearCustomerThread(phone);
     await db.cancelPendingOrders(phone);
+    await db.clearChatBlock(phone);
     return res.json({ ok: true, removed });
   });
 
@@ -100,6 +104,15 @@ export function registerAdminRoutes(app) {
     res.send(usageCsv(report));
   });
 
+  app.get('/api/blocks', async (_req, res) => {
+    const now = Date.now();
+    const blocks = (await db.listChatBlocks(now)).map((row) => ({
+      ...row,
+      notice: blockNotice(row, now),
+    })).filter((row) => row.notice);
+    res.json({ blocks });
+  });
+
   app.get('/api/customers', async (_req, res) => {
     const { rows } = await query(`
       SELECT c.wa_id AS phone, c.full_name AS name,
@@ -114,8 +127,9 @@ export function registerAdminRoutes(app) {
       ORDER BY last_at DESC NULLS LAST
       LIMIT 200
     `);
-    const blocks = await db.listChatBlocks();
-    const blocked = new Map(blocks.map((row) => [row.phone, row]));
+    const now = Date.now();
+    const blocks = await db.listChatBlocks(now);
+    const blocked = new Map(blocks.map((row) => [row.phone, { ...row, notice: blockNotice(row, now) }]));
     res.json({
       customers: rows.map((row) => ({
         phone: row.phone,

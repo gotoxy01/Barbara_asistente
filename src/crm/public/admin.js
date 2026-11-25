@@ -38,6 +38,7 @@ function show(view) {
   if (view === 'productos') loadProducts();
   if (view === 'ventas') loadSales('day');
   if (view === 'probar') loadSimOrder();
+  if (view === 'cocina' || view === 'clientes') loadBlocks().catch(() => {});
 }
 
 document.getElementById('tabs').addEventListener('click', (event) => {
@@ -60,16 +61,17 @@ function showMenu(menu) {
   for (const option of menu?.options || []) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = option.description ? `${option.title} · ${option.description}` : option.title;
-    button.addEventListener('click', () => sendSim(option.id));
+    button.textContent = option.description ? `${option.title} — ${option.description}` : option.title;
+    button.addEventListener('click', () => sendSim(option.id, {}, option.title));
     box.appendChild(button);
   }
 }
 
-async function sendSim(text, extra = {}) {
+async function sendSim(text, extra = {}, label) {
   const phone = $('simPhone').value.trim();
   const name = $('simName').value.trim();
-  if (text) addBubble('user', text.startsWith('menu:') ? text : text);
+  const shown = label || (/^(menu:|pago:|stock:)/.test(text || '') ? '' : text);
+  if (shown) addBubble('user', shown);
   const data = await api('/api/simulator/turn', {
     method: 'POST',
     body: JSON.stringify({ phone, name, text, ...extra }),
@@ -93,8 +95,16 @@ $('simReset').addEventListener('click', async () => {
   await api('/api/simulator/reset', { method: 'POST', body: JSON.stringify({ phone: $('simPhone').value.trim() }) });
   $('simLog').innerHTML = '';
   $('simMenu').innerHTML = '';
-  addBubble('bot', 'Listo. La prueba empieza de cero.');
+  addBubble('bot', 'Listo. La prueba empieza de cero y el número quedó desbloqueado.');
   await loadSimOrder();
+  await loadBlocks();
+});
+
+$('simUnblock').addEventListener('click', async () => {
+  const phone = $('simPhone').value.replace(/\D/g, '');
+  await api(`/api/customers/${phone}/unblock`, { method: 'POST', body: '{}' });
+  addBubble('bot', 'Número desbloqueado. Ya puede escribir.');
+  await loadBlocks();
 });
 
 async function loadSimOrder() {
@@ -163,7 +173,7 @@ async function loadCustomers() {
   const data = await api('/api/customers');
   const rows = data.customers.map((row) => {
     const address = (row.addresses || []).map((item) => item?.text || item?.label || item).filter(Boolean).join(' · ');
-    const state = row.blocked ? (row.blocked.reason === 'manual' ? 'Bloqueado a mano' : 'Bloqueado por spam') : 'Libre';
+    const state = row.blocked?.notice || 'Libre';
     return `<tr>
       <td>${escapeHtml(row.name || '')}<br>+${escapeHtml(row.phone)}</td>
       <td>${row.orders}</td>
@@ -181,6 +191,30 @@ async function loadCustomers() {
   </tr></thead><tbody>${rows || '<tr><td colspan="6">No hay clientes.</td></tr>'}</tbody></table>`;
 }
 
+async function loadBlocks() {
+  const banner = $('blockBanner');
+  if (!banner) return;
+  const data = await api('/api/blocks');
+  if (!data.blocks?.length) {
+    banner.hidden = true;
+    banner.innerHTML = '';
+    return;
+  }
+  banner.hidden = false;
+  banner.innerHTML = data.blocks.map((row) => `<p>+${escapeHtml(row.phone)}: ${escapeHtml(row.notice)}</p>
+    <button type="button" data-unblock="${escapeHtml(row.phone)}">Desbloquear</button>`).join('');
+}
+
+document.getElementById('view-cocina')?.addEventListener('click', async (event) => {
+  const phone = event.target?.dataset?.unblock;
+  if (!phone) return;
+  await api(`/api/customers/${phone}/unblock`, { method: 'POST', body: '{}' });
+  await loadBlocks();
+});
+
+loadBlocks().catch(() => {});
+setInterval(() => loadBlocks().catch(() => {}), 15000);
+
 $('customerTable').addEventListener('click', async (event) => {
   const block = event.target.dataset.block;
   const unblock = event.target.dataset.unblock;
@@ -188,6 +222,7 @@ $('customerTable').addEventListener('click', async (event) => {
   const phone = block || unblock;
   await api(`/api/customers/${phone}/${block ? 'block' : 'unblock'}`, { method: 'POST', body: '{}' });
   await loadCustomers();
+  await loadBlocks();
 });
 
 async function loadProducts() {

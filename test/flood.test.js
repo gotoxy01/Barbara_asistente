@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { assessFlood, collapseBurst, FLOOD_WARNING } from '../src/services/floodControl.js';
+import { assessFlood, blockNotice, collapseBurst, FLOOD_WARNING } from '../src/services/floodControl.js';
 
 const minute = 60_000;
 const day = 86_400_000;
@@ -50,6 +50,15 @@ describe('anti-spam', () => {
     const manual = assessFlood({ now, manual: true, text: 'hola', countMinute: 1, countDay: 1 });
     assert.equal(manual.action, 'silence');
     assert.equal(manual.reply, null);
+  });
+
+  it('el aviso del panel dice hasta qué hora sigue bloqueado', () => {
+    const until = Date.parse('2026-11-25T18:30:00.000Z');
+    assert.equal(
+      blockNotice({ reason: 'flood', blockedUntil: until }, until - 60_000),
+      'Número bloqueado por exceso de mensajes hasta 14:30',
+    );
+    assert.equal(blockNotice({ reason: 'manual', blockedUntil: null }), 'Número bloqueado a mano');
   });
 
   it('el tope del día también bloquea', () => {

@@ -390,7 +390,7 @@ async function handleCustomerMessageNow({ phone, name, text, wamid = null }, { n
   }
   const displayName = chat.name || name;
 
-  const flood = await judgeFlood(phone, text);
+  const flood = test ? { action: 'allow' } : await judgeFlood(phone, text);
   if (flood.action !== 'allow') {
     if (flood.persist) {
       await db.saveChatBlock(phone, {

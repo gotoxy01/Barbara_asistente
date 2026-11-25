@@ -35,6 +35,7 @@
     </nav>
 
     <div id="view-cocina">
+    <div id="blockBanner" class="block-banner" hidden></div>
     <section class="rail-wrap">
       <h2 class="rail-title">🔥 En cocina</h2>
       <div class="rail-bar"></div>
@@ -96,11 +97,12 @@
       <div class="admin-grid">
         <div class="panel">
           <h2>Probar como cliente</h2>
-          <p class="meta">No sale por WhatsApp y no cuenta en el costo. Teléfono de prueba.</p>
+          <p class="meta">No sale por WhatsApp, no cuenta en el costo y no activa el límite de mensajes. Los botones de abajo son el menú.</p>
           <div class="row">
             <input id="simPhone" value="580000000000" />
             <input id="simName" value="Cliente de prueba" />
             <button type="button" id="simReset" class="btn-ghost">Empezar de cero</button>
+            <button type="button" id="simUnblock" class="btn-ghost">Desbloquear este número</button>
           </div>
           <div id="simLog" class="sim-log"></div>
           <div id="simMenu" class="sim-menu"></div>

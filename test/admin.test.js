@@ -72,8 +72,9 @@ describe('panel: simulador y uso', { skip, concurrency: 1 }, () => {
       const body = await turn.json();
       assert.equal(turn.status, 200);
       assert.equal(body.prueba, true);
-      assert.ok(body.menu?.options?.length);
-      assert.match(body.reply, /1\./);
+      assert.ok(body.menu?.options?.some((row) => row.id === 'menu:productos'));
+      assert.equal(String(body.reply).includes('[menu:'), false);
+      assert.match(body.reply, /ayudar/i);
 
       await recordUsage({ phone, kind: 'outbound_bot', calls: 3 });
       const month = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Caracas', year: 'numeric', month: '2-digit' }).format(new Date());
@@ -130,6 +131,47 @@ describe('panel: simulador y uso', { skip, concurrency: 1 }, () => {
       assert.ok(Array.isArray(today.orders));
       const alerts = await (await fetch(`${base}/api/alerts`)).json();
       assert.ok(Array.isArray(alerts.alerts));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      await db.closeDb();
+    }
+  });
+
+  it('el simulador ignora un bloqueo y empezar de cero lo borra', async () => {
+    const db = await import('../src/db.js');
+    const { createCrmApp } = await import('../src/crm/server.js');
+    await db.initDb();
+    const phone = `5824${Date.now().toString().slice(-8)}`;
+    await db.upsertChat(phone, 'Prueba bloqueo');
+    await db.saveChatBlock(phone, {
+      reason: 'flood',
+      blockedUntil: Date.now() + 30 * 60 * 1000,
+      warnedAt: Date.now(),
+      notifiedAt: Date.now(),
+    });
+    const app = createCrmApp();
+    const server = await new Promise((resolve) => {
+      const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const turn = await fetch(`${base}/api/simulator/turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, text: 'hola' }),
+      });
+      const body = await turn.json();
+      assert.equal(turn.status, 200);
+      assert.ok(body.menu?.options?.length);
+      assert.equal(String(body.reply).includes('[menu:'), false);
+      assert.equal(String(body.reply).includes('Recibimos muchos mensajes'), false);
+      await fetch(`${base}/api/simulator/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone }),
+      });
+      const blocks = await (await fetch(`${base}/api/blocks`)).json();
+      assert.equal(blocks.blocks.some((row) => row.phone === phone), false);
     } finally {
       await new Promise((resolve) => server.close(resolve));
       await db.closeDb();

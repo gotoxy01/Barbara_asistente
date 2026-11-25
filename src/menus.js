@@ -317,6 +317,19 @@ export function choiceFromText(text, menu) {
   return menu.options[Number(raw) - 1]?.id || null;
 }
 
+/** Texto del menú sin la lista numerada ni los ids. El panel pinta botones aparte. */
+export function menuSpeech(text) {
+  return String(text || '')
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed !== 'Responda con el número.' && !/^\d+\.\s/.test(trimmed);
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function renderMenuText(menu) {
   if (!menu?.options?.length) return '';
   const lines = [menu.body, ''];
